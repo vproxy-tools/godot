@@ -75,8 +75,14 @@ public:
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) = 0;
 
 	virtual void texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer = 0) = 0;
-	// Full shadow image plus dirty rectangle; backends may fall back to full upload.
-	virtual void texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region) { texture_2d_update(p_texture, p_image); }
+	// Full shadow or packed dirty-rectangle pixels. Backends may reconstruct a full upload.
+	virtual void texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region, bool p_packed_patch = false) {
+		if (!p_packed_patch) { texture_2d_update(p_texture, p_image); return; }
+		Ref<Image> full = texture_2d_get(p_texture);
+		ERR_FAIL_COND(full.is_null());
+		full->blit_rect(p_image, Rect2i(Point2i(), p_image->get_size()), p_region.position);
+		texture_2d_update(p_texture, full);
+	}
 	virtual void texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) = 0;
 	virtual void texture_external_update(RID p_proxy, int p_width, int p_height, uint64_t p_external_buffer) = 0;
 	virtual void texture_proxy_update(RID p_proxy, RID p_base) = 0;

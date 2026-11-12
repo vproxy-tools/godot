@@ -1316,19 +1316,19 @@ void TextureStorage::texture_2d_update(RID p_texture, const Ref<Image> &p_image,
 #endif
 }
 
-void TextureStorage::texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region) {
+void TextureStorage::texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region, bool p_packed_patch) {
 	Texture *tex = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL(tex);
 	ERR_FAIL_COND(p_image.is_null() || tex->is_render_target);
-	ERR_FAIL_COND(p_image->get_size() != Size2i(tex->width, tex->height) || p_image->get_format() != tex->format);
-	ERR_FAIL_COND(p_region.size.x <= 0 || p_region.size.y <= 0 || !Rect2i(Point2i(), p_image->get_size()).encloses(p_region));
+	ERR_FAIL_COND(p_image->get_size() != (p_packed_patch ? p_region.size : Size2i(tex->width, tex->height)) || p_image->get_format() != tex->format);
+	ERR_FAIL_COND(p_region.size.x <= 0 || p_region.size.y <= 0 || !Rect2i(Point2i(), Size2i(tex->width, tex->height)).encloses(p_region));
 	if (tex->type != Texture::TYPE_2D || tex->mipmaps != 1 || tex->compressed || tex->real_format != tex->format ||
 			tex->alloc_width != tex->width || tex->alloc_height != tex->height ||
 			(tex->format != Image::FORMAT_RGBA8 && tex->format != Image::FORMAT_RGBAF)) {
-		texture_2d_update(p_texture, p_image);
+		RendererTextureStorage::texture_2d_update_region(p_texture, p_image, p_region, p_packed_patch);
 		return;
 	}
-	Ref<Image> patch = p_image->get_region(p_region);
+	Ref<Image> patch = p_packed_patch ? p_image : p_image->get_region(p_region);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(tex->target, tex->tex_id);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
