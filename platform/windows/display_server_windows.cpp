@@ -2006,10 +2006,22 @@ bool DisplayServerWindows::_is_always_on_top_recursive(DisplayServerEnums::Windo
 	return false;
 }
 
+void DisplayServerWindows::release_javafx_startup_window(DisplayServerEnums::WindowID p_window) {
+	ERR_FAIL_COND(!windows.has(p_window));
+	if (!windows[p_window].javafx_startup_hidden) {
+		return;
+	}
+	windows[p_window].javafx_startup_hidden = false;
+	show_window(p_window);
+}
+
 void DisplayServerWindows::show_window(DisplayServerEnums::WindowID p_id) {
 	ERR_FAIL_COND(!windows.has(p_id));
 
 	WindowData &wd = windows[p_id];
+	if (wd.javafx_startup_hidden) {
+		return;
+	}
 	popup_open(p_id);
 
 	if (p_id != DisplayServerEnums::MAIN_WINDOW_ID) {
@@ -6761,6 +6773,15 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 			_legacy_update_hdr_output_for_tracked_windows(true);
 		} break;
 
+		// Style changes can call ShowWindow before the JavaFX host is ready.
+		case WM_WINDOWPOSCHANGING: {
+			if (windows[window_id].javafx_startup_hidden) {
+				auto *position = reinterpret_cast<WINDOWPOS *>(lParam);
+				position->flags &= ~SWP_SHOWWINDOW;
+				position->flags |= SWP_NOACTIVATE;
+			}
+		} break;
+
 		case WM_WINDOWPOSCHANGED: {
 			WindowData &window = windows[window_id];
 
@@ -7412,6 +7433,7 @@ Error DisplayServerWindows::_create_window(DisplayServerEnums::WindowID p_window
 		WindowData &wd = windows[id];
 
 		wd.id = id;
+		wd.javafx_startup_hidden = javafx_startup_enabled;
 		wd.hWnd = CreateWindowExW(
 				dwExStyle,
 				L"Engine", L"",
@@ -7942,6 +7964,8 @@ void DisplayServerWindows::tablet_set_current_driver(const String &p_driver) {
 }
 
 DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
+	const String startup = OS::get_singleton()->get_environment("GODOT_JFX_STARTUP");
+	javafx_startup_enabled = p_context == DisplayServerEnums::CONTEXT_ENGINE && (startup == "logo" || startup == "hidden");
 	KeyMappingWindows::initialize();
 
 	tested_drivers.clear();

@@ -273,6 +273,8 @@ class DisplayServerWindows : public DisplayServer {
 	GLManagerNative_Windows *gl_manager_native = nullptr;
 #endif
 
+	bool javafx_startup_enabled = false;
+
 #if defined(RD_ENABLED)
 	RenderingContextDriver *rendering_context = nullptr;
 	RenderingDevice *rendering_device = nullptr;
@@ -296,6 +298,7 @@ class DisplayServerWindows : public DisplayServer {
 	void _winrt_adv_color_info_cb(DisplayServerEnums::WindowID p_id);
 
 	struct WindowData {
+		bool javafx_startup_hidden = false;
 		HWND hWnd;
 		DisplayServerEnums::WindowID id;
 		WinRTWindowData *wrt_wd = nullptr;
@@ -589,6 +592,7 @@ class DisplayServerWindows : public DisplayServer {
 	bool _try_create_shortcut();
 
 public:
+	void release_javafx_startup_window(DisplayServerEnums::WindowID p_window);
 	LRESULT WndProcFileDialog(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	LRESULT WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	LRESULT MouseProc(int code, WPARAM wParam, LPARAM lParam);
