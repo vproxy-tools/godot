@@ -193,6 +193,13 @@ class WinRTWindowData;
 
 class JoypadSDL;
 
+// Optional native drag-and-drop delegate consulted by DropTargetWindows before
+// the built-in file-drop handling. p_kind: 1=enter, 2=over, 3=leave, 4=drop.
+// p_data_object is an IDataObject * (passed as void * to keep OLE types out of
+// this header). Returns true when the event was fully handled; *r_effect then
+// holds the DROPEFFECT to report back to the drag source.
+typedef bool (*DisplayServerWindowsDragDelegate)(void *p_userdata, int p_kind, void *p_data_object, DWORD p_key_state, POINTL p_point, DWORD *r_effect);
+
 class DisplayServerWindows : public DisplayServer {
 	GDSOFTCLASS(DisplayServerWindows, DisplayServer);
 
@@ -381,6 +388,10 @@ class DisplayServerWindows : public DisplayServer {
 
 		// OLE API
 		DropTargetWindows *drop_target = nullptr;
+
+		// Optional native drag-and-drop delegate (used by the JavaFX host module).
+		DisplayServerWindowsDragDelegate drag_delegate = nullptr;
+		void *drag_delegate_userdata = nullptr;
 
 		DisplayServerEnums::WindowID transient_parent = DisplayServerEnums::INVALID_WINDOW_ID;
 		HashSet<DisplayServerEnums::WindowID> transient_children;
@@ -666,6 +677,11 @@ public:
 	virtual void window_set_input_text_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 
 	virtual void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+
+	// Installs (or clears, with nullptr) a native drag delegate on the window's
+	// OLE drop target. Not part of the DisplayServer API; used by platform
+	// modules such as the JavaFX host. Failure preserves the previous delegate.
+	Error window_set_drag_delegate(DisplayServerEnums::WindowID p_window, DisplayServerWindowsDragDelegate p_delegate, void *p_userdata);
 
 	virtual void window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual Size2i window_get_title_size(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;

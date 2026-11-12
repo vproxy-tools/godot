@@ -792,6 +792,39 @@ DisplayServerEnums::WindowID RendererViewport::_get_containing_window(Viewport *
 	return DisplayServerEnums::INVALID_WINDOW_ID;
 }
 
+// Diagnostic phase timing for the JavaFX offscreen pass path.
+static uint64_t godot_jfx_canvas_update_us = 0;
+static uint64_t godot_jfx_prepare_us = 0;
+static uint64_t godot_jfx_draw_us = 0;
+static uint64_t godot_jfx_pass_count = 0;
+
+void RendererViewport::draw_offscreen_2d(RID p_viewport) {
+	Viewport *vp = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(vp);
+	ERR_FAIL_COND(!vp->disable_3d || vp->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID);
+	if (vp->update_mode == RSE::VIEWPORT_UPDATE_DISABLED) return;
+	static const bool godot_jfx_profile = OS::get_singleton()->get_environment("GODOT_JFX_OFFSCREEN_PROFILE") == "1";
+	const uint64_t godot_jfx_t0 = godot_jfx_profile ? OS::get_singleton()->get_ticks_usec() : 0;
+	RSG::canvas->update();
+	const uint64_t godot_jfx_t1 = godot_jfx_profile ? OS::get_singleton()->get_ticks_usec() : 0;
+	RSG::texture_storage->render_target_set_as_unused(vp->render_target);
+	const uint64_t godot_jfx_t2 = godot_jfx_profile ? OS::get_singleton()->get_ticks_usec() : 0;
+	_draw_viewport(vp);
+	const uint64_t godot_jfx_t3 = godot_jfx_profile ? OS::get_singleton()->get_ticks_usec() : 0;
+	if (godot_jfx_profile) {
+		godot_jfx_canvas_update_us += godot_jfx_t1 - godot_jfx_t0;
+		godot_jfx_prepare_us += godot_jfx_t2 - godot_jfx_t1;
+		godot_jfx_draw_us += godot_jfx_t3 - godot_jfx_t2;
+		if ((++godot_jfx_pass_count & 2047) == 0) {
+			print_line(vformat("GODOT_JFX_OFFSCREEN_PHASES calls=%d update_us=%d prepare_us=%d draw_us=%d dirty_items=%d item_us=%d res_us=%d res_calls=%d",
+					godot_jfx_pass_count, godot_jfx_canvas_update_us, godot_jfx_prepare_us, godot_jfx_draw_us,
+					RSG::canvas->get_godot_jfx_dirty_item_count(), RSG::canvas->get_godot_jfx_item_update_us(),
+					RSG::canvas->get_godot_jfx_resource_update_us(), RSG::canvas->get_godot_jfx_resource_update_calls()));
+		}
+	}
+	if (vp->update_mode == RSE::VIEWPORT_UPDATE_ONCE) vp->update_mode = RSE::VIEWPORT_UPDATE_DISABLED;
+}
+
 void RendererViewport::draw_viewports(bool p_swap_buffers) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "prepare viewports");
 	timestamp_vp_map.clear();

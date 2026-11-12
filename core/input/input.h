@@ -478,6 +478,11 @@ public:
 
 	CursorShape get_default_cursor_shape() const;
 	void set_default_cursor_shape(CursorShape p_shape);
+	// Same as set_default_cursor_shape, but does not synthesize a mouse motion
+	// event. Hosts that apply the OS cursor directly (e.g. the JavaFX host) use
+	// this to keep the Viewport's per-motion fallback in sync without injecting
+	// a fake input event into the scene and the hosted application.
+	void set_default_cursor_shape_quiet(CursorShape p_shape) { default_shape = p_shape; }
 	CursorShape get_current_cursor_shape() const;
 	void set_custom_mouse_cursor(const Ref<Resource> &p_cursor, CursorShape p_shape = Input::CursorShape::CURSOR_ARROW, const Vector2 &p_hotspot = Vector2());
 

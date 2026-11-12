@@ -425,6 +425,7 @@ Error GLManagerNative_Windows::_create_context(GLWindow &win, GLDisplay &gl_disp
 }
 
 Error GLManagerNative_Windows::window_create(DisplayServerEnums::WindowID p_window_id, HWND p_hwnd, HINSTANCE p_hinstance, int p_width, int p_height) {
+	MutexLock lock(windows_mutex);
 	HDC hDC = GetDC(p_hwnd);
 	if (!hDC) {
 		return ERR_CANT_CREATE;
@@ -447,14 +448,17 @@ Error GLManagerNative_Windows::window_create(DisplayServerEnums::WindowID p_wind
 	// and each of them has a higher id than the previous, so it must be used in a map not a vector.
 	_windows[p_window_id] = win;
 
-	// make current
-	window_make_current(p_window_id);
-
+	// The context switch is the caller's job: with a separate render thread the
+	// shared context is owned there, so making the window current from the window
+	// creation thread fails with ERROR_BUSY (170).
 	return OK;
 }
 
 void GLManagerNative_Windows::window_destroy(DisplayServerEnums::WindowID p_window_id) {
-	GLWindow &win = get_window(p_window_id);
+	MutexLock lock(windows_mutex);
+	auto *entry = _windows.find(p_window_id);
+	if (!entry) return; // Window closed before this queued operation executed.
+	GLWindow &win = entry->value();
 	if (_current_window == &win) {
 		_current_window = nullptr;
 	}
@@ -462,6 +466,7 @@ void GLManagerNative_Windows::window_destroy(DisplayServerEnums::WindowID p_wind
 }
 
 void GLManagerNative_Windows::release_current() {
+	MutexLock lock(windows_mutex);
 	if (!_current_window) {
 		return;
 	}
@@ -474,12 +479,16 @@ void GLManagerNative_Windows::release_current() {
 }
 
 void GLManagerNative_Windows::window_make_current(DisplayServerEnums::WindowID p_window_id) {
+	MutexLock lock(windows_mutex);
 	if (p_window_id == -1) {
 		return;
 	}
 
-	// crash if our data structures are out of sync, i.e. not found
-	GLWindow &win = _windows[p_window_id];
+	// A deferred switch can reach the FIFO after the main thread closed the
+	// window. Never use operator[] here: it would create an invalid entry.
+	auto *entry = _windows.find(p_window_id);
+	if (!entry) return;
+	GLWindow &win = entry->value();
 
 	// noop
 	if (&win == _current_window) {
@@ -489,13 +498,15 @@ void GLManagerNative_Windows::window_make_current(DisplayServerEnums::WindowID p
 	const GLDisplay &disp = get_display(win.gldisplay_id);
 	if (!gd_wglMakeCurrent(win.hDC, disp.hRC)) {
 		ERR_PRINT("Could not switch OpenGL context to other window: " + format_error_message(GetLastError()));
+		return;
 	}
 
 	_current_window = &win;
 }
 
 void GLManagerNative_Windows::swap_buffers() {
-	SwapBuffers(_current_window->hDC);
+	MutexLock lock(windows_mutex);
+	if (_current_window) SwapBuffers(_current_window->hDC);
 }
 
 Error GLManagerNative_Windows::initialize() {
@@ -504,10 +515,14 @@ Error GLManagerNative_Windows::initialize() {
 }
 
 void GLManagerNative_Windows::set_use_vsync(DisplayServerEnums::WindowID p_window_id, bool p_use) {
-	GLWindow &win = get_window(p_window_id);
+	MutexLock lock(windows_mutex);
+	auto *entry = _windows.find(p_window_id);
+	if (!entry) return; // Window closed before this queued operation executed.
+	GLWindow &win = entry->value();
 
 	if (&win != _current_window) {
 		window_make_current(p_window_id);
+		if (&win != _current_window) return;
 	}
 
 	if (wglSwapIntervalEXT) {
@@ -522,14 +537,20 @@ void GLManagerNative_Windows::set_use_vsync(DisplayServerEnums::WindowID p_windo
 }
 
 bool GLManagerNative_Windows::is_using_vsync(DisplayServerEnums::WindowID p_window_id) const {
+	MutexLock lock(windows_mutex);
+	ERR_FAIL_COND_V(!_windows.has(p_window_id), false);
 	return get_window(p_window_id).use_vsync;
 }
 
 HDC GLManagerNative_Windows::get_hdc(DisplayServerEnums::WindowID p_window_id) {
+	MutexLock lock(windows_mutex);
+	ERR_FAIL_COND_V(!_windows.has(p_window_id), nullptr);
 	return get_window(p_window_id).hDC;
 }
 
 HGLRC GLManagerNative_Windows::get_hglrc(DisplayServerEnums::WindowID p_window_id) {
+	MutexLock lock(windows_mutex);
+	ERR_FAIL_COND_V(!_windows.has(p_window_id), nullptr);
 	const GLWindow &win = get_window(p_window_id);
 	const GLDisplay &disp = get_display(win.gldisplay_id);
 	return disp.hRC;

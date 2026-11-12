@@ -469,8 +469,9 @@ WinRTWindowData *WinRTUtils::create_wd(HWND p_window, const Callable &p_color_cb
 
 		ERR_FAIL_COND_V(FAILED(interop->GetForWindow(p_window, IID_PPV_ARGS(&wd->disp_info))), wd);
 
-		GodotAdvancedColorInfoChangedEventHandler *handler = new GodotAdvancedColorInfoChangedEventHandler(p_window_id, p_color_cb);
-		ERR_FAIL_COND_V(FAILED(handler->QueryInterface(IID_PPV_ARGS(&wd->handler))), wd);
+		// Adopt the initial COM reference. QueryInterface would add a second
+		// reference and leave the handler (and its Callable) alive after teardown.
+		wd->handler.Attach(new GodotAdvancedColorInfoChangedEventHandler(p_window_id, p_color_cb));
 		ERR_FAIL_COND_V(FAILED(wd->disp_info->add_AdvancedColorInfoChanged(wd->handler.Get(), &wd->token)), wd);
 
 		wd->has_disp_info = true;

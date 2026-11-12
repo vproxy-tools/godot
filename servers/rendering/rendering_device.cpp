@@ -2309,6 +2309,10 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 }
 
 Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data) {
+	return texture_update_region(p_texture, p_layer, p_data, Rect2i());
+}
+
+Error RenderingDevice::texture_update_region(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data, const Rect2i &p_region) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a draw list.");
@@ -2332,8 +2336,19 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 	uint32_t layer_count = _texture_layer_count(texture);
 	ERR_FAIL_COND_V(p_layer >= layer_count, ERR_INVALID_PARAMETER);
 
+	const bool region_update = p_region != Rect2i();
+	if (region_update) {
+		ERR_FAIL_COND_V(texture->type != TEXTURE_TYPE_2D || texture->mipmaps != 1 || texture->depth != 1, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(p_region.position.x < 0 || p_region.position.y < 0 || p_region.size.x <= 0 || p_region.size.y <= 0 ||
+				int64_t(p_region.position.x) + p_region.size.x > texture->width || int64_t(p_region.position.y) + p_region.size.y > texture->height, ERR_INVALID_PARAMETER);
+		uint32_t block_width, block_height;
+		get_compressed_image_format_block_dimensions(texture->format, block_width, block_height);
+		ERR_FAIL_COND_V(block_width != 1 || block_height != 1, ERR_INVALID_PARAMETER);
+	}
+	const uint32_t update_width = region_update ? uint32_t(p_region.size.x) : texture->width;
+	const uint32_t update_height = region_update ? uint32_t(p_region.size.y) : texture->height;
 	uint32_t width, height;
-	uint32_t tight_mip_size = get_image_format_required_size(texture->format, texture->width, texture->height, texture->depth, texture->mipmaps, &width, &height);
+	uint32_t tight_mip_size = get_image_format_required_size(texture->format, update_width, update_height, texture->depth, texture->mipmaps, &width, &height);
 	uint32_t required_size = tight_mip_size;
 	uint32_t required_align = _texture_alignment(texture);
 
@@ -2363,12 +2378,12 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 
 	uint32_t mipmap_offset = 0;
 
-	uint32_t logic_width = texture->width;
-	uint32_t logic_height = texture->height;
+	uint32_t logic_width = update_width;
+	uint32_t logic_height = update_height;
 
 	for (uint32_t mm_i = 0; mm_i < texture->mipmaps; mm_i++) {
 		uint32_t depth = 0;
-		uint32_t image_total = get_image_format_required_size(texture->format, texture->width, texture->height, texture->depth, mm_i + 1, &width, &height, &depth);
+		uint32_t image_total = get_image_format_required_size(texture->format, update_width, update_height, texture->depth, mm_i + 1, &width, &height, &depth);
 
 		const uint8_t *read_ptr_mipmap = read_ptr + mipmap_offset;
 		tight_mip_size = image_total - mipmap_offset;
@@ -2418,7 +2433,7 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 					copy_region.texture_subresource.aspect = texture->read_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ? RDD::TEXTURE_ASPECT_DEPTH : RDD::TEXTURE_ASPECT_COLOR;
 					copy_region.texture_subresource.mipmap = mm_i;
 					copy_region.texture_subresource.layer = p_layer;
-					copy_region.texture_offset = Vector3i(x, y, z);
+					copy_region.texture_offset = Vector3i(x + p_region.position.x, y + p_region.position.y, z);
 					copy_region.texture_region_size = Vector3i(region_logic_w, region_logic_h, 1);
 
 					RDG::RecordedBufferToTextureCopy buffer_to_texture_copy;

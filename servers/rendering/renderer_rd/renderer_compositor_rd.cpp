@@ -63,25 +63,20 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServerEnums::Win
 
 		BlitMode mode = p_render_targets[i].lens_distortion.apply ? BLIT_MODE_LENS : (p_render_targets[i].multi_view.use_layer ? BLIT_MODE_USE_LAYER : BLIT_MODE_NORMAL);
 
-		HashMap<RID, RID>::Iterator it = render_target_descriptors.find(rd_texture);
-		if (it == render_target_descriptors.end() || !RD::get_singleton()->uniform_set_is_valid(it->value)) {
-			Vector<RD::Uniform> uniforms;
-			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-			u.binding = 0;
-			u.append_id(blit.sampler);
-			u.append_id(rd_texture);
-			uniforms.push_back(u);
-			RID uniform_set = RD::get_singleton()->uniform_set_create(uniforms, blit.shader.version_get_shader(blit.shader_version, mode), 0);
-
-			it = render_target_descriptors.insert(rd_texture, uniform_set);
-		}
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		u.binding = 0;
+		u.append_id(blit.sampler);
+		u.append_id(rd_texture);
+		// The shared cache removes its entry when the texture invalidates the
+		// uniform set. A map keyed only by texture RID retained dead windows.
+		RID uniform_set = uniform_set_cache->get_cache(blit.shader.version_get_shader(blit.shader_version, mode), 0, u);
 
 		Size2 screen_size(RD::get_singleton()->screen_get_width(p_screen), RD::get_singleton()->screen_get_height(p_screen));
 
 		RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, blit_pipelines.pipelines[mode]);
 		RD::get_singleton()->draw_list_bind_index_array(draw_list, blit.array);
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, it->value, 0);
+		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
 
 		// We need to invert the phone rotation.
 		const int screen_rotation_degrees = -RD::get_singleton()->screen_get_pre_rotation_degrees(p_screen);

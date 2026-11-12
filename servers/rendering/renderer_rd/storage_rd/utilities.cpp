@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "utilities.h"
+#include "core/os/os.h"
 
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
@@ -249,14 +250,32 @@ String Utilities::get_captured_timestamp_name(uint32_t p_index) const {
 
 /* MISC */
 
+static uint64_t godot_jfx_gsu_us = 0, godot_jfx_qm_us = 0, godot_jfx_mm_us = 0, godot_jfx_da_us = 0, godot_jfx_calls = 0;
+
 void Utilities::update_dirty_resources() {
+	static const bool profile = OS::get_singleton()->get_environment("GODOT_JFX_OFFSCREEN_PROFILE") == "1";
+	const uint64_t godot_jfx_t0 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 	MaterialStorage::get_singleton()->_update_global_shader_uniforms(); //must do before materials, so it can queue them for update
+	const uint64_t godot_jfx_t1 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 	MaterialStorage::get_singleton()->_update_queued_materials();
+	const uint64_t godot_jfx_t2 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 	MeshStorage::get_singleton()->_update_dirty_multimeshes();
 	MeshStorage::get_singleton()->_update_dirty_skeletons();
+	const uint64_t godot_jfx_t3 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 	TextureStorage::get_singleton()->decal_atlas_redraw_textures();
 	TextureStorage::get_singleton()->update_decal_atlas();
 	TextureStorage::get_singleton()->update_area_light_atlas();
+	const uint64_t godot_jfx_t4 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
+	if (!profile) return;
+	godot_jfx_gsu_us += godot_jfx_t1 - godot_jfx_t0;
+	godot_jfx_qm_us += godot_jfx_t2 - godot_jfx_t1;
+	godot_jfx_mm_us += godot_jfx_t3 - godot_jfx_t2;
+	godot_jfx_da_us += godot_jfx_t4 - godot_jfx_t3;
+	godot_jfx_calls++;
+	if ((godot_jfx_calls & 16383) == 0) {
+		print_line(vformat("GODOT_JFX_RES_PHASES calls=%d gsu_us=%d queued_materials_us=%d mesh_us=%d decal_us=%d",
+				godot_jfx_calls, godot_jfx_gsu_us, godot_jfx_qm_us, godot_jfx_mm_us, godot_jfx_da_us));
+	}
 }
 
 bool Utilities::has_os_feature(const String &p_feature) const {

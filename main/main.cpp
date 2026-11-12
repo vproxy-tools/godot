@@ -5114,7 +5114,17 @@ bool Main::iteration() {
 #endif // NAVIGATION_3D_DISABLED
 
 	GodotProfileZoneGrouped(_profile_zone, "RenderingServer::sync");
+	// HOVER_TAP stall phase probe (diagnostic, GODOT_JFX_HOVER_TAP=1): splits
+	// the inter-tick gap into engine-render phases (rs sync / draw+present)
+	// versus the OS message pump and pacing outside Main::iteration.
+	static const bool hover_tap_phases = OS::get_singleton()->get_environment("GODOT_JFX_HOVER_TAP") == "1";
+	uint64_t hover_phase_start = hover_tap_phases ? OS::get_singleton()->get_ticks_usec() : 0;
 	RenderingServer::get_singleton()->sync(); //sync if still drawing from previous frames.
+	if (hover_tap_phases) {
+		uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - hover_phase_start;
+		if (elapsed > 100000) print_line(vformat("HOVER_TAP t_abs=%dms HOST_PHASE phase=main_rs_sync ms=%d", int64_t(OS::get_singleton()->get_ticks_usec() / 1000), int64_t(elapsed / 1000)));
+		hover_phase_start = OS::get_singleton()->get_ticks_usec();
+	}
 
 	GodotProfileZoneGrouped(_profile_zone, "RenderingServer::draw");
 #ifdef RD_ENABLED
@@ -5135,6 +5145,10 @@ bool Main::iteration() {
 			}
 		} else {
 			RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
+			if (hover_tap_phases) {
+				uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - hover_phase_start;
+				if (elapsed > 100000) print_line(vformat("HOVER_TAP t_abs=%dms HOST_PHASE phase=main_rs_draw ms=%d", int64_t(OS::get_singleton()->get_ticks_usec() / 1000), int64_t(elapsed / 1000)));
+			}
 			Engine::get_singleton()->increment_frames_drawn();
 			force_redraw_requested = false;
 		}

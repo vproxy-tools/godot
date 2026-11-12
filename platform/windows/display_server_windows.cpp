@@ -55,6 +55,7 @@
 #include "servers/display/accessibility_server.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/rendering_server.h"
 
 #ifdef SDL_ENABLED
 #include "drivers/sdl/joypad_sdl.h"
@@ -2206,9 +2207,34 @@ void DisplayServerWindows::window_set_drop_files_callback(const Callable &p_call
 	window_data.drop_files_callback = p_callable;
 
 	if (window_data.drop_target == nullptr) {
-		window_data.drop_target = memnew(DropTargetWindows(&window_data));
-		ERR_FAIL_COND(RegisterDragDrop(window_data.hWnd, window_data.drop_target) != S_OK);
+		DropTargetWindows *target = memnew(DropTargetWindows(&window_data));
+		const HRESULT result = RegisterDragDrop(window_data.hWnd, target);
+		if (FAILED(result)) {
+			target->Release();
+			ERR_FAIL_MSG(vformat("RegisterDragDrop failed (HRESULT %d).", int64_t(result)));
+		}
+		window_data.drop_target = target;
 	}
+}
+
+Error DisplayServerWindows::window_set_drag_delegate(DisplayServerEnums::WindowID p_window, DisplayServerWindowsDragDelegate p_delegate, void *p_userdata) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND_V(!windows.has(p_window), ERR_DOES_NOT_EXIST);
+	WindowData &window_data = windows[p_window];
+	if (p_delegate != nullptr && window_data.drop_target == nullptr) {
+		DropTargetWindows *target = memnew(DropTargetWindows(&window_data));
+		const HRESULT result = RegisterDragDrop(window_data.hWnd, target);
+		if (FAILED(result)) {
+			target->Release();
+			ERR_FAIL_V_MSG(FAILED, vformat("RegisterDragDrop failed (HRESULT %d).", int64_t(result)));
+		}
+		window_data.drop_target = target;
+	}
+	// Publish only after registration succeeds; failure leaves the old delegate intact.
+	window_data.drag_delegate = p_delegate;
+	window_data.drag_delegate_userdata = p_userdata;
+	return OK;
 }
 
 void DisplayServerWindows::window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window) {
@@ -2712,6 +2738,10 @@ void DisplayServerWindows::_update_window_style(DisplayServerEnums::WindowID p_w
 
 	_get_window_style(p_window == DisplayServerEnums::MAIN_WINDOW_ID, wd.initialized, wd.fullscreen, wd.multiwindow_fs, wd.borderless, wd.resizable, wd.no_min_btn, wd.no_max_btn, wd.minimized, wd.maximized, wd.maximized_fs, wd.no_focus || wd.is_popup, wd.parent_hwnd, wd.no_redirection_bitmap, style, style_ex);
 
+	// Changing decoration/focus flags must neither hide a visible borderless
+	// subwindow nor reveal a hidden main window. Visibility is controlled by
+	// ShowWindow; the initial-style helper cannot infer its current OS state.
+	style = (style & ~WS_VISIBLE) | (GetWindowLongPtr(wd.hWnd, GWL_STYLE) & WS_VISIBLE);
 	SetWindowLongPtr(wd.hWnd, GWL_STYLE, style);
 	SetWindowLongPtr(wd.hWnd, GWL_EXSTYLE, style_ex);
 
@@ -2844,7 +2874,11 @@ void DisplayServerWindows::window_set_mode(DisplayServerEnums::WindowMode p_mode
 		Rect2i usable = screen_get_usable_rect(cs);
 		Point2 pos = usable.position + _get_screens_origin();
 		Size2 size = usable.size;
-		MoveWindow(wd.hWnd, pos.x, pos.y, size.width, size.height, TRUE);
+		// WM_WINDOWPOSCHANGED subtracts the borderless expansion before
+		// comparing against the usable rect. Apply the same expansion here
+		// or the maximized window loses two pixels and its maximized state.
+		Vector2i off = _get_screen_expand_offset(cs);
+		MoveWindow(wd.hWnd, pos.x, pos.y, size.width + off.x, size.height + off.y, TRUE);
 	}
 
 	if (p_mode == DisplayServerEnums::WINDOW_MODE_MINIMIZED) {
@@ -3247,14 +3281,16 @@ Vector2i DisplayServerWindows::ime_get_selection() const {
 	_THREAD_SAFE_METHOD_
 
 	DisplayServerEnums::WindowID window_id = _get_focused_window_or_popup();
+	if (!windows.has(window_id)) return Vector2i();
 	const WindowData &wd = windows[window_id];
-	if (!wd.ime_active) {
+	if (!wd.ime_active || !wd.ime_in_progress) {
 		return Vector2i();
 	}
 
 	int cursor = ImmGetCompositionStringW(wd.im_himc, GCS_CURSORPOS, nullptr, 0);
 
 	int32_t length = ImmGetCompositionStringW(wd.im_himc, GCS_COMPSTR, nullptr, 0);
+	if (length <= 0) return Vector2i();
 	wchar_t *string = reinterpret_cast<wchar_t *>(memalloc(length));
 	ImmGetCompositionStringW(wd.im_himc, GCS_COMPSTR, string, length);
 
@@ -3279,13 +3315,15 @@ String DisplayServerWindows::ime_get_text() const {
 	_THREAD_SAFE_METHOD_
 
 	DisplayServerEnums::WindowID window_id = _get_focused_window_or_popup();
+	if (!windows.has(window_id)) return String();
 	const WindowData &wd = windows[window_id];
-	if (!wd.ime_active) {
+	if (!wd.ime_active || !wd.ime_in_progress) {
 		return String();
 	}
 
 	String ret;
 	int32_t length = ImmGetCompositionStringW(wd.im_himc, GCS_COMPSTR, nullptr, 0);
+	if (length <= 0) return String();
 	wchar_t *string = reinterpret_cast<wchar_t *>(memalloc(length));
 	ImmGetCompositionStringW(wd.im_himc, GCS_COMPSTR, string, length);
 	ret.append_utf16((char16_t *)string, length / sizeof(wchar_t));
@@ -4527,7 +4565,8 @@ void DisplayServerWindows::process_events() {
 	bool has_touch_events = process_raw_input();
 
 	DisplayServerEnums::WindowID window_id = _get_focused_window_or_popup();
-	const WindowData &wd = windows[window_id];
+	const auto *focused_window = windows.find(window_id);
+	const bool ime_active = focused_window && focused_window->get().ime_active;
 
 	// The pump throttles only what the hardware can flood, and drains the rest.
 	// See <https://ph3at.github.io/posts/Windows-Input/> for more information.
@@ -4562,7 +4601,7 @@ void DisplayServerWindows::process_events() {
 		}
 		return ret;
 	};
-	if (has_touch_events || wd.ime_active) {
+	if (has_touch_events || ime_active) {
 		// Process all messages.
 		while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
@@ -5081,6 +5120,16 @@ void DisplayServerWindows::delete_status_indicator(DisplayServerEnums::Indicator
 	indicators.erase(p_id);
 }
 
+#if defined(GLES3_ENABLED)
+// Callable arguments must be Variant-representable, hence the integer packing.
+static void _gl_manager_native_set_use_vsync(int64_t p_manager, int64_t p_window, bool p_use_vsync) {
+	reinterpret_cast<GLManagerNative_Windows *>(static_cast<uintptr_t>(p_manager))->set_use_vsync(DisplayServerEnums::WindowID(p_window), p_use_vsync);
+}
+static void _gl_manager_native_window_make_current(int64_t p_manager, int64_t p_window) {
+	reinterpret_cast<GLManagerNative_Windows *>(static_cast<uintptr_t>(p_manager))->window_make_current(DisplayServerEnums::WindowID(p_window));
+}
+#endif
+
 void DisplayServerWindows::window_set_vsync_mode(DisplayServerEnums::VSyncMode p_vsync_mode, DisplayServerEnums::WindowID p_window) {
 	_THREAD_SAFE_METHOD_
 #if defined(RD_ENABLED)
@@ -5091,7 +5140,15 @@ void DisplayServerWindows::window_set_vsync_mode(DisplayServerEnums::VSyncMode p
 
 #if defined(GLES3_ENABLED)
 	if (gl_manager_native) {
-		gl_manager_native->set_use_vsync(p_window, p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
+		// wglMakeCurrent fails with ERROR_BUSY (170) while the shared GL context is
+		// owned by the separate render thread; apply the swap interval there.
+		GLManagerNative_Windows *manager = gl_manager_native;
+		bool use_vsync = p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED;
+		if (RenderingServer::get_singleton()) {
+			RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(_gl_manager_native_set_use_vsync).bind(int64_t(reinterpret_cast<uintptr_t>(manager)), int64_t(p_window), use_vsync));
+		} else {
+			manager->set_use_vsync(p_window, use_vsync);
+		}
 	}
 #if defined(ANGLE_ENABLED)
 	if (gl_manager_angle) {
@@ -6751,7 +6808,8 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 					if (window.borderless && (screen_size != usable.size || screen_position != usable.position)) {
 						Point2 pos = usable.position + _get_screens_origin();
 						Size2 size = usable.size;
-						MoveWindow(window.hWnd, pos.x, pos.y, size.width, size.height, TRUE);
+						Vector2i expand = _get_screen_expand_offset(screen_id);
+						MoveWindow(window.hWnd, pos.x, pos.y, size.width + expand.x, size.height + expand.y, TRUE);
 					}
 				} else if (window_rect.position == screen_position && window_rect.size == screen_size) {
 					window.fullscreen = true;
@@ -6948,6 +7006,9 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 			if (windows[window_id].ime_active) {
 				windows[window_id].ime_in_progress = false;
 				windows[window_id].ime_suppress_next_keyup = true;
+				// Cancellation may end without another WM_IME_COMPOSITION. Let
+				// controls remove their preedit text in that case as well.
+				OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_OS_IME_UPDATE);
 			}
 			return 0;
 		} break;
@@ -7615,6 +7676,15 @@ Error DisplayServerWindows::_create_gl_window(DisplayServerEnums::WindowID p_win
 
 		Error err = gl_manager_native->window_create(p_window_id, wd.hWnd, hInstance, wd.width, wd.height);
 		ERR_FAIL_COND_V_MSG(err != OK, err, "Failed to create native OpenGL window.");
+
+		// wglMakeCurrent fails with ERROR_BUSY (170) while the shared GL context is
+		// owned by the separate render thread; switch the new window in there.
+		GLManagerNative_Windows *manager = gl_manager_native;
+		if (RenderingServer::get_singleton()) {
+			RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(_gl_manager_native_window_make_current).bind(int64_t(reinterpret_cast<uintptr_t>(manager)), int64_t(p_window_id)));
+		} else {
+			manager->window_make_current(p_window_id);
+		}
 
 		wd.gl_native_window_created = true;
 	}

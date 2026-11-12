@@ -286,12 +286,16 @@ ULONG STDMETHODCALLTYPE DropTargetWindows::AddRef() {
 ULONG STDMETHODCALLTYPE DropTargetWindows::Release() {
 	ULONG count = InterlockedDecrement(&ref_count);
 	if (count == 0) {
-		memfree(this);
+		memdelete(this);
 	}
 	return count;
 }
 
 HRESULT STDMETHODCALLTYPE DropTargetWindows::DragEnter(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) {
+	if (window_data->drag_delegate && window_data->drag_delegate(window_data->drag_delegate_userdata, 1, pDataObj, grfKeyState, pt, pdwEffect)) {
+		return S_OK;
+	}
+
 	(void)grfKeyState;
 	(void)pt;
 
@@ -312,6 +316,10 @@ HRESULT STDMETHODCALLTYPE DropTargetWindows::DragEnter(IDataObject *pDataObj, DW
 }
 
 HRESULT STDMETHODCALLTYPE DropTargetWindows::DragOver(DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) {
+	if (window_data->drag_delegate && window_data->drag_delegate(window_data->drag_delegate_userdata, 2, nullptr, grfKeyState, pt, pdwEffect)) {
+		return S_OK;
+	}
+
 	(void)grfKeyState;
 	(void)pt;
 
@@ -320,10 +328,21 @@ HRESULT STDMETHODCALLTYPE DropTargetWindows::DragOver(DWORD grfKeyState, POINTL 
 }
 
 HRESULT STDMETHODCALLTYPE DropTargetWindows::DragLeave() {
+	if (window_data->drag_delegate) {
+		DWORD effect = DROPEFFECT_NONE;
+		POINTL pt = { 0, 0 };
+		if (window_data->drag_delegate(window_data->drag_delegate_userdata, 3, nullptr, 0, pt, &effect)) {
+			return S_OK;
+		}
+	}
 	return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE DropTargetWindows::Drop(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) {
+	if (window_data->drag_delegate && window_data->drag_delegate(window_data->drag_delegate_userdata, 4, pDataObj, grfKeyState, pt, pdwEffect)) {
+		return S_OK;
+	}
+
 	(void)grfKeyState;
 	(void)pt;
 

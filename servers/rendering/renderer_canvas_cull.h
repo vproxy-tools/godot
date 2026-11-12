@@ -378,6 +378,10 @@ public:
 
 	void update_visibility_notifiers();
 	void update_dirty_items();
+	static uint64_t get_godot_jfx_dirty_item_count();
+	static uint64_t get_godot_jfx_item_update_us();
+	static uint64_t get_godot_jfx_resource_update_us();
+	static uint64_t get_godot_jfx_resource_update_calls();
 
 	void _update_dirty_item(Item *p_item);
 

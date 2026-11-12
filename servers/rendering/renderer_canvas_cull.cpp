@@ -30,6 +30,7 @@
 
 #include "renderer_canvas_cull.h"
 
+#include "core/os/os.h"
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/geometry_2d.h"
@@ -2557,13 +2558,40 @@ void RendererCanvasCull::_item_queue_update(Item *p_item, bool p_update_dependen
 	}
 }
 
+static uint64_t godot_jfx_dirty_items = 0;
+uint64_t godot_jfx_item_update_us = 0;
+uint64_t godot_jfx_resource_update_us = 0;
+uint64_t godot_jfx_resource_update_calls = 0;
+
 void RendererCanvasCull::update_dirty_items() {
+	static const bool profile = OS::get_singleton()->get_environment("GODOT_JFX_OFFSCREEN_PROFILE") == "1";
+	const uint64_t t0 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 	while (_item_update_list.first()) {
+		if (profile) ++godot_jfx_dirty_items;
 		_update_dirty_item(_item_update_list.first()->self());
 	}
+	const uint64_t t1 = profile ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	// Instance updates may affect resources.
 	RSG::utilities->update_dirty_resources();
+	if (profile) {
+		godot_jfx_item_update_us += t1 - t0;
+		godot_jfx_resource_update_us += OS::get_singleton()->get_ticks_usec() - t1;
+		++godot_jfx_resource_update_calls;
+	}
+}
+
+uint64_t RendererCanvasCull::get_godot_jfx_dirty_item_count() {
+	return godot_jfx_dirty_items;
+}
+uint64_t RendererCanvasCull::get_godot_jfx_item_update_us() {
+	return godot_jfx_item_update_us;
+}
+uint64_t RendererCanvasCull::get_godot_jfx_resource_update_us() {
+	return godot_jfx_resource_update_us;
+}
+uint64_t RendererCanvasCull::get_godot_jfx_resource_update_calls() {
+	return godot_jfx_resource_update_calls;
 }
 
 void RendererCanvasCull::_update_dirty_item(Item *p_item) {

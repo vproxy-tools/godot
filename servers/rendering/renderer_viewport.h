@@ -310,6 +310,9 @@ public:
 	void handle_timestamp(String p_timestamp, uint64_t p_cpu_time, uint64_t p_gpu_time);
 
 	void draw_viewports(bool p_swap_buffers);
+	// Render-thread-only pass for a standalone 2D texture. Keeps commands in
+	// the current GPU frame, without advancing or presenting other viewports.
+	void draw_offscreen_2d(RID p_viewport);
 
 	bool free(RID p_rid);
 
