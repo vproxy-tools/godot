@@ -70,7 +70,12 @@ env.drivers_sources += thirdparty_obj
 
 driver_obj = []
 
-env.add_source_files(driver_obj, "*.cpp")
+env_vulkan_driver = env.Clone()
+# The optional JavaFX module owns this setting. Do not retain its profiling
+# hooks in viewport-only builds or builds without the module.
+if "javafx" in env.module_list and env.get("javafx_rd_direct", False):
+    env_vulkan_driver.Append(CPPDEFINES=["GODOT_JAVAFX_RD_DIRECT_ENABLED"])
+env_vulkan_driver.add_source_files(driver_obj, "*.cpp")
 env.drivers_sources += driver_obj
 
 # Needed to force rebuilding the driver files when the thirdparty code is updated.
