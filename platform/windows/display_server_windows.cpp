@@ -55,7 +55,6 @@
 #include "servers/display/accessibility_server.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
-#include "servers/rendering/rendering_server.h"
 
 #ifdef SDL_ENABLED
 #include "drivers/sdl/joypad_sdl.h"
@@ -5132,15 +5131,6 @@ void DisplayServerWindows::delete_status_indicator(DisplayServerEnums::Indicator
 	indicators.erase(p_id);
 }
 
-#if defined(GLES3_ENABLED)
-// Callable arguments must be Variant-representable, hence the integer packing.
-static void _gl_manager_native_set_use_vsync(int64_t p_manager, int64_t p_window, bool p_use_vsync) {
-	reinterpret_cast<GLManagerNative_Windows *>(static_cast<uintptr_t>(p_manager))->set_use_vsync(DisplayServerEnums::WindowID(p_window), p_use_vsync);
-}
-static void _gl_manager_native_window_make_current(int64_t p_manager, int64_t p_window) {
-	reinterpret_cast<GLManagerNative_Windows *>(static_cast<uintptr_t>(p_manager))->window_make_current(DisplayServerEnums::WindowID(p_window));
-}
-#endif
 
 void DisplayServerWindows::window_set_vsync_mode(DisplayServerEnums::VSyncMode p_vsync_mode, DisplayServerEnums::WindowID p_window) {
 	_THREAD_SAFE_METHOD_
@@ -5152,15 +5142,7 @@ void DisplayServerWindows::window_set_vsync_mode(DisplayServerEnums::VSyncMode p
 
 #if defined(GLES3_ENABLED)
 	if (gl_manager_native) {
-		// wglMakeCurrent fails with ERROR_BUSY (170) while the shared GL context is
-		// owned by the separate render thread; apply the swap interval there.
-		GLManagerNative_Windows *manager = gl_manager_native;
-		bool use_vsync = p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED;
-		if (RenderingServer::get_singleton()) {
-			RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(_gl_manager_native_set_use_vsync).bind(int64_t(reinterpret_cast<uintptr_t>(manager)), int64_t(p_window), use_vsync));
-		} else {
-			manager->set_use_vsync(p_window, use_vsync);
-		}
+		gl_manager_native->set_use_vsync(p_window, p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
 	}
 #if defined(ANGLE_ENABLED)
 	if (gl_manager_angle) {
@@ -7698,15 +7680,6 @@ Error DisplayServerWindows::_create_gl_window(DisplayServerEnums::WindowID p_win
 
 		Error err = gl_manager_native->window_create(p_window_id, wd.hWnd, hInstance, wd.width, wd.height);
 		ERR_FAIL_COND_V_MSG(err != OK, err, "Failed to create native OpenGL window.");
-
-		// wglMakeCurrent fails with ERROR_BUSY (170) while the shared GL context is
-		// owned by the separate render thread; switch the new window in there.
-		GLManagerNative_Windows *manager = gl_manager_native;
-		if (RenderingServer::get_singleton()) {
-			RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(_gl_manager_native_window_make_current).bind(int64_t(reinterpret_cast<uintptr_t>(manager)), int64_t(p_window_id)));
-		} else {
-			manager->window_make_current(p_window_id);
-		}
 
 		wd.gl_native_window_created = true;
 	}

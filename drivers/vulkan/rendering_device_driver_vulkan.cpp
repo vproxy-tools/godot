@@ -38,24 +38,6 @@
 
 #include <thirdparty/misc/smolv.h>
 
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-// Opt-in wall-time diagnostics for the JavaFX host's presentation investigation.
-// Thread-local counters avoid synchronization on the renderer's hot path.
-namespace {
-struct JfxVulkanWaitProfile {
-	bool enabled = OS::get_singleton()->get_environment("GODOT_JFX_PROFILE_VULKAN") == "1";
-	uint64_t acquire_us = 0, fence_us = 0, submit_us = 0, present_us = 0, presents = 0;
-	uint64_t begin() const { return enabled ? OS::get_singleton()->get_ticks_usec() : 0; }
-	void end(uint64_t start, uint64_t &total) { if (enabled) total += OS::get_singleton()->get_ticks_usec() - start; }
-};
-JfxVulkanWaitProfile &jfx_vulkan_wait_profile() {
-	// Function-local TLS initializes after OS startup, unlike MSVC's eager
-	// namespace-scope TLS constructor on the process's initial thread.
-	static thread_local JfxVulkanWaitProfile profile;
-	return profile;
-}
-}
-#endif
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
 #include "platform/android/java_godot_wrapper.h"
 #include "platform/android/os_android.h"
@@ -3132,19 +3114,10 @@ RDD::FenceID RenderingDeviceDriverVulkan::fence_create() {
 }
 
 Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-	auto &jfx_vk_wait = jfx_vulkan_wait_profile();
-#endif
 	Fence *fence = (Fence *)(p_fence.id);
 	VkResult fence_status = vkGetFenceStatus(vk_device, fence->vk_fence);
 	if (fence_status == VK_NOT_READY) {
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		const uint64_t profile_start = jfx_vk_wait.begin();
-#endif
 		VkResult err = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, UINT64_MAX);
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		jfx_vk_wait.end(profile_start, jfx_vk_wait.fence_us);
-#endif
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't wait for Vulkan fence (VkResult error %d).", err));
 	}
 
@@ -3276,9 +3249,6 @@ RDD::CommandQueueID RenderingDeviceDriverVulkan::command_queue_create(CommandQue
 }
 
 Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) {
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-	auto &jfx_vk_wait = jfx_vulkan_wait_profile();
-#endif
 	DEV_ASSERT(p_cmd_queue.id != 0);
 
 	VkResult err;
@@ -3354,15 +3324,9 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		submit_info.signalSemaphoreCount = signal_semaphores.size();
 		submit_info.pSignalSemaphores = signal_semaphores.ptr();
 
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		const uint64_t profile_submit_start = jfx_vk_wait.begin();
-#endif
 		device_queue.submit_mutex.lock();
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
 		device_queue.submit_mutex.unlock();
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		jfx_vk_wait.end(profile_submit_start, jfx_vk_wait.submit_us);
-#endif
 
 		if (err == VK_ERROR_DEVICE_LOST) {
 			print_lost_device_info();
@@ -3412,9 +3376,6 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		present_info.pImageIndices = image_indices.ptr();
 		present_info.pResults = results.ptr();
 
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		const uint64_t profile_present_start = jfx_vk_wait.begin();
-#endif
 		device_queue.submit_mutex.lock();
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
 		if (swappy_frame_pacer_enable) {
@@ -3427,12 +3388,6 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 #endif
 
 		device_queue.submit_mutex.unlock();
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-		jfx_vk_wait.end(profile_present_start, jfx_vk_wait.present_us);
-		if (jfx_vk_wait.enabled && ++jfx_vk_wait.presents % 60 == 0) {
-			print_line(vformat("JFX_VK_WAIT presents=%d acquire_us=%d fence_us=%d submit_us=%d present_us=%d", jfx_vk_wait.presents, jfx_vk_wait.acquire_us, jfx_vk_wait.fence_us, jfx_vk_wait.submit_us, jfx_vk_wait.present_us));
-		}
-#endif
 
 		// Set the index to an invalid value. If any of the swap chains returned out of date, indicate it should be resized the next time it's acquired.
 		bool any_result_is_out_of_date = false;
@@ -4096,9 +4051,6 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 }
 
 RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) {
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-	auto &jfx_vk_wait = jfx_vulkan_wait_profile();
-#endif
 	DEV_ASSERT(p_cmd_queue);
 	DEV_ASSERT(p_swap_chain);
 
@@ -4136,13 +4088,7 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 	swap_chain->command_queues_acquired.push_back(command_queue);
 	swap_chain->command_queues_acquired_semaphores.push_back(semaphore_index);
 
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-	const uint64_t profile_acquire_start = jfx_vk_wait.begin();
-#endif
 	err = device_functions.AcquireNextImageKHR(vk_device, swap_chain->vk_swapchain, UINT64_MAX, semaphore, VK_NULL_HANDLE, &swap_chain->image_index);
-#ifdef GODOT_JAVAFX_RD_DIRECT_ENABLED
-	jfx_vk_wait.end(profile_acquire_start, jfx_vk_wait.acquire_us);
-#endif
 	if (err == VK_ERROR_OUT_OF_DATE_KHR) {
 		// Out of date leaves the semaphore in a signaled state that will never finish, so it's necessary to recreate it.
 		bool semaphore_recreated = _recreate_image_semaphore(command_queue, semaphore_index, true);

@@ -32,7 +32,6 @@
 
 #if defined(WINDOWS_ENABLED) && defined(GLES3_ENABLED)
 
-#include "core/os/mutex.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rb_map.h"
 #include "servers/display/display_server_enums.h"
@@ -49,8 +48,8 @@ private:
 		bool use_vsync = false;
 
 		// windows specific
-		HDC hDC = nullptr;
-		HWND hwnd = nullptr;
+		HDC hDC;
+		HWND hwnd;
 
 		int gldisplay_id = 0;
 	};
@@ -60,9 +59,6 @@ private:
 		HGLRC hRC;
 	};
 
-	// Main-thread window lifetime overlaps queued render-thread GL operations.
-	// Recursive because set_use_vsync/release call other guarded methods.
-	mutable Mutex windows_mutex;
 	RBMap<DisplayServerEnums::WindowID, GLWindow> _windows;
 	LocalVector<GLDisplay> _displays;
 
@@ -70,6 +66,7 @@ private:
 
 	PFNWGLSWAPINTERVALEXTPROC wglSwapIntervalEXT = nullptr;
 
+	GLWindow &get_window(unsigned int id) { return _windows[id]; }
 	const GLWindow &get_window(unsigned int id) const { return _windows[id]; }
 
 	const GLDisplay &get_current_display() const { return _displays[_current_window->gldisplay_id]; }

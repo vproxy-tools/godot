@@ -297,15 +297,6 @@ void RenderingServerDefault::finish() {
 			server_task_id = WorkerThreadPool::INVALID_TASK_ID;
 		}
 		server_thread = Thread::MAIN_ID;
-
-#ifdef RD_ENABLED
-		// The main RenderingDevice is owned by DisplayServer and is destroyed
-		// on main after this render worker has stopped. Return its thread
-		// ownership just as _assign_mt_ids() transferred it during startup.
-		if (RenderingDevice *rd = RenderingDevice::get_singleton()) {
-			rd->make_current();
-		}
-#endif // RD_ENABLED
 	} else {
 		_finish();
 	}

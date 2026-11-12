@@ -1655,21 +1655,21 @@ void TextureStorage::texture_2d_update(RID p_texture, const Ref<Image> &p_image,
 	_texture_2d_update(p_texture, p_image, p_layer, false);
 }
 
-void TextureStorage::texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region, bool p_packed_patch) {
+void TextureStorage::texture_2d_update_region(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_region) {
 	Texture *tex = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL(tex);
 	ERR_FAIL_COND(p_image.is_null() || tex->is_render_target);
-	ERR_FAIL_COND(p_image->get_size() != (p_packed_patch ? p_region.size : Size2i(tex->width, tex->height)) || p_image->get_format() != tex->format);
+	ERR_FAIL_COND(p_image->get_size() != p_region.size || p_image->get_format() != tex->format);
 	ERR_FAIL_COND(p_region.size.x <= 0 || p_region.size.y <= 0 || !Rect2i(Point2i(), Size2i(tex->width, tex->height)).encloses(p_region));
 	if (tex->type != TYPE_2D || tex->mipmaps != 1 || (tex->format != Image::FORMAT_RGBA8 && tex->format != Image::FORMAT_RGBAF)) {
-		RendererTextureStorage::texture_2d_update_region(p_texture, p_image, p_region, p_packed_patch);
+		RendererTextureStorage::texture_2d_update_region(p_texture, p_image, p_region);
 		return;
 	}
 #ifdef TOOLS_ENABLED
 	tex->image_cache_2d.unref();
 #endif
 	TextureToRDFormat format;
-	Ref<Image> patch = _validate_texture_format(p_packed_patch ? p_image : p_image->get_region(p_region), format);
+	Ref<Image> patch = _validate_texture_format(p_image, format);
 	RD::get_singleton()->texture_update_region(tex->rd_texture, 0, patch->get_data(), p_region);
 }
 
