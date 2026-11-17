@@ -1074,15 +1074,11 @@ void Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_em
 		set_joy_axis(jm->get_device(), jm->get_axis(), jm->get_axis_value());
 	}
 
-	Ref<InputEventGesture> ge = p_event;
-
-	if (ge.is_valid()) {
-		if (event_dispatch_function) {
-			_THREAD_SAFE_UNLOCK_
-			event_dispatch_function(ge);
-			_THREAD_SAFE_LOCK_
-		}
-	}
+	// godot-jfx: upstream dispatches gesture events once here and once again in
+	// the generic event_dispatch_function call at the end of this function, so
+	// every InputEventPanGesture/InputEventMagnifyGesture is delivered twice.
+	// Consumers (the JavaFX host scroll path, GUI controls) require exactly-once
+	// delivery; keep only the final generic dispatch.
 
 	for (const KeyValue<StringName, InputMap::Action> &E : InputMap::get_singleton()->get_action_map()) {
 		const int event_index = InputMap::get_singleton()->event_get_index(p_event, E.key);
