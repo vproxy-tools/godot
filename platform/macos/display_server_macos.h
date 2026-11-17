@@ -57,6 +57,27 @@ class InputEvent;
 class InputEventWithModifiers;
 class NativeMenuMacOS;
 
+// Optional native drag-and-drop delegate consulted by GodotContentView before
+// the built-in file-drop handling, mirroring DisplayServerWindows. p_kind:
+// 1=enter, 2=over, 3=leave, 4=drop. p_sender is an id<NSDraggingInfo> (passed
+// as void * so platform modules can stay Objective-C free); p_x/p_y are Godot
+// screen coordinates. Effects use the Windows DROPEFFECT bit layout (1 copy,
+// 2 move, 4 link) so platform modules share one action encoding; the view
+// maps them to NSDragOperation. Returns true when the event was fully handled;
+// *r_effect then holds the DROPEFFECT to report back to the drag source.
+typedef bool (*DisplayServerMacOSDragDelegate)(void *p_userdata, int p_kind, void *p_sender, int p_x, int p_y, uint32_t *r_effect);
+
+// Optional drag-source hook (used by the JavaFX host module). AppKit only
+// tracks the physical button when a dragging session is started from inside
+// a real mouseDown/mouseDragged dispatch; a module that initiates drags from
+// its own (queued) command processing therefore registers a handler here,
+// and the content view invokes it from the next real mouseDragged. Return
+// true when the drag session consumed the event; the hook is one-shot and is
+// cleared before the handler runs. The content view invokes the handler with
+// a nil event from mouseUp when the button is released first, cancelling the
+// pending start so a stale session can never fire on an unrelated later drag.
+typedef bool (*DisplayServerMacOSDragStartHandler)(void *p_userdata, NSEvent *p_event, NSView *p_view);
+
 #ifdef TOOLS_ENABLED
 class EmbeddedProcessMacOS;
 #endif
@@ -116,6 +137,16 @@ public:
 		Callable input_text_callback;
 		Callable drop_files_callback;
 
+		// Optional native drag-and-drop delegate (used by the JavaFX host
+		// module). Consulted by GodotContentView before the default file-drop
+		// handling; the userdata pointer is owned by the module.
+		DisplayServerMacOSDragDelegate drag_delegate = nullptr;
+		void *drag_delegate_userdata = nullptr;
+
+		// Pending drag-source start (see DisplayServerMacOSDragStartHandler).
+		DisplayServerMacOSDragStartHandler drag_start_handler = nullptr;
+		void *drag_start_userdata = nullptr;
+
 		ObjectID instance_id;
 		bool fs_transition = false;
 		bool initial_size = true;
@@ -127,6 +158,30 @@ public:
 		bool layered_window = false;
 		bool fullscreen = false;
 		bool exclusive_fullscreen = false;
+		// Emulated fullscreen used when the window server refuses the AppKit
+		// fullscreen transition (windowDidFailToEnterFullScreen); the saved
+		// frame/style/level are restored on exit.
+		bool manual_fullscreen = false;
+		NSRect manual_fs_restore = NSMakeRect(0, 0, 0, 0);
+		NSUInteger manual_fs_stylemask = 0;
+		NSInteger manual_fs_level = 0;
+		bool manual_fs_titlebar_transparent = false;
+		NSInteger manual_fs_title_visibility = 0;
+		// Minimized state tracked explicitly: AppKit clears isMiniaturized only
+		// when the deminiaturize animation finishes, but window_set_mode must
+		// report the restored mode synchronously (matching other platforms).
+		bool minimized = false;
+		// Last position requested through window_set_position (or creation).
+		// AppKit occasionally re-anchors attached child windows on its own;
+		// windowDidMove re-asserts this position instead of feeding the
+		// spontaneous move back into scene state.
+		bool position_valid = false;
+		Point2i position;
+		// Set while window_set_position applies the frame change. AppKit posts
+		// NSWindowDidMoveNotification synchronously from inside that call, and
+		// the delegate must not mistake the requested move for a spontaneous
+		// AppKit re-anchor and snap the window back.
+		bool in_set_position = false;
 		bool on_top = false;
 		bool borderless = false;
 		bool resize_disabled = false;
@@ -135,8 +190,10 @@ public:
 		bool no_focus = false;
 		bool is_popup = false;
 		bool mpass = false;
+		bool ignore_mouse_events_override = false;
 		bool focused = false;
 		bool is_visible = true;
+		bool javafx_startup_hidden = false;
 		bool extend_to_title = false;
 		bool hide_from_capture = false;
 
@@ -187,6 +244,7 @@ private:
 	DisplayServerEnums::WindowID window_mouseover_id = DisplayServerEnums::INVALID_WINDOW_ID;
 	DisplayServerEnums::WindowID last_focused_window = DisplayServerEnums::INVALID_WINDOW_ID;
 	DisplayServerEnums::WindowID window_id_counter = DisplayServerEnums::MAIN_WINDOW_ID;
+	bool javafx_startup_enabled = false;
 	float display_max_scale = 1.f;
 	mutable Point2i origin;
 	mutable bool displays_arrangement_dirty = true;
@@ -319,6 +377,13 @@ public:
 
 	virtual DisplayServerEnums::WindowID create_sub_window(DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Rect2i &p_rect = Rect2i(), bool p_exclusive = false, DisplayServerEnums::WindowID p_transient_parent = DisplayServerEnums::INVALID_WINDOW_ID) override;
 	virtual void show_window(DisplayServerEnums::WindowID p_id) override;
+	// Shows a window that was created hidden while the embedded JavaFX runtime
+	// starts up (GODOT_JFX_STARTUP); a no-op for every other window.
+	void release_javafx_startup_window(DisplayServerEnums::WindowID p_window);
+	// Emulated fullscreen for windows whose AppKit fullscreen transition the
+	// window server refused; enter restores nothing until exit is requested.
+	void window_manual_fullscreen_enter(DisplayServerEnums::WindowID p_window);
+	void window_manual_fullscreen_exit(DisplayServerEnums::WindowID p_window);
 	virtual void delete_sub_window(DisplayServerEnums::WindowID p_id) override;
 
 	virtual DisplayServerEnums::WindowID window_get_active_popup() const override;
@@ -330,6 +395,19 @@ public:
 	virtual void window_set_input_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual void window_set_input_text_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+
+	// Installs (or clears, with nullptr) a native drag delegate on the window's
+	// content view and registers the pasteboard types it needs. Not part of the
+	// DisplayServer API; used by platform modules such as the JavaFX host.
+	// Failure preserves the previous delegate.
+	Error window_set_drag_delegate(DisplayServerEnums::WindowID p_window, DisplayServerMacOSDragDelegate p_delegate, void *p_userdata);
+	// Registers additional pasteboard types (the application/x-godot-custom-*
+	// drag formats of an in-flight source) so inbound drags reach the delegate.
+	void window_register_drag_types(DisplayServerEnums::WindowID p_window, const Vector<String> &p_types);
+	// Installs a one-shot drag-source start handler; the content view runs it
+	// from the next real mouseDragged dispatch (AppKit only tracks the
+	// physical button for sessions started inside event dispatch).
+	void window_set_drag_start_handler(DisplayServerEnums::WindowID p_window, DisplayServerMacOSDragStartHandler p_handler, void *p_userdata);
 
 	virtual void window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual Size2i window_get_title_size(const String &p_title, DisplayServerEnums::WindowID p_window) const override;
@@ -369,6 +447,16 @@ public:
 	virtual void window_move_to_foreground(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual bool window_is_focused(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 
+	// Drives Godot's logical focus state (and the matching FOCUS_IN/OUT window
+	// events) when the window server refuses to activate the app, so focus
+	// requests keep the same observable semantics as on other platforms.
+	void window_set_logical_focus(DisplayServerEnums::WindowID p_window);
+
+	// Host-driven modal input gate. The per-frame mouse-passthrough sweep in
+	// _process_events re-derives ignoresMouseEvents from mpass/mpath and would
+	// stomp an explicit set; this override exempts the window from that sweep.
+	void window_set_ignore_mouse_events(DisplayServerEnums::WindowID p_window, bool p_ignore);
+
 	virtual DisplayServerEnums::WindowID get_focused_window() const override;
 
 	virtual bool window_can_draw(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
@@ -377,6 +465,8 @@ public:
 
 	virtual void window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual void window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+	// Commits the in-progress IME composition as regular text input.
+	void window_commit_ime_composition(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID);
 
 	virtual DisplayServerEnums::WindowID get_window_at_screen_position(const Point2i &p_position) const override;
 

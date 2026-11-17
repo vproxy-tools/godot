@@ -112,6 +112,7 @@ DisplayServerEnums::WindowID DisplayServerMacOS::_create_window(DisplayServerEnu
 	{
 		WindowData &wd = windows[id];
 
+		wd.javafx_startup_hidden = javafx_startup_enabled;
 		wd.window_delegate = [[GodotWindowDelegate alloc] initWithDisplayServer:this];
 		ERR_FAIL_NULL_V_MSG(wd.window_delegate, DisplayServerEnums::INVALID_WINDOW_ID, "Can't create a window delegate");
 		[wd.window_delegate setWindowID:id];
@@ -254,6 +255,8 @@ DisplayServerEnums::WindowID DisplayServerMacOS::_create_window(DisplayServerEnu
 	window_id_counter++;
 
 	WindowData &wd = windows[id];
+	wd.position = window_get_position(id);
+	wd.position_valid = true;
 	window_set_mode(p_mode, id);
 
 	const NSRect contentRect = [wd.window_view frame];
@@ -1467,24 +1470,13 @@ int DisplayServerMacOS::screen_get_dpi(int p_screen) const {
 
 	p_screen = _get_screen_index(p_screen);
 	int screen_count = get_screen_count();
-	ERR_FAIL_INDEX_V(p_screen, screen_count, 72);
+	ERR_FAIL_INDEX_V(p_screen, screen_count, 96);
 
-	NSArray *screenArray = [NSScreen screens];
-	if ((NSUInteger)p_screen < [screenArray count]) {
-		NSScreen *screen = [screenArray objectAtIndex:p_screen];
-		NSDictionary *description = [screen deviceDescription];
-
-		const NSSize displayPixelSize = [[description objectForKey:NSDeviceSize] sizeValue];
-		const CGSize displayPhysicalSize = CGDisplayScreenSize(_get_display_id_for_screen(screen));
-		float scale = [screen backingScaleFactor];
-
-		float den2 = (displayPhysicalSize.width / 25.4f) * (displayPhysicalSize.width / 25.4f) + (displayPhysicalSize.height / 25.4f) * (displayPhysicalSize.height / 25.4f);
-		if (den2 > 0.0f) {
-			return std::ceil(std::sqrt(displayPixelSize.width * displayPixelSize.width + displayPixelSize.height * displayPixelSize.height) / std::sqrt(den2) * scale);
-		}
-	}
-
-	return 72;
+	// Report the logical UI DPI (96 per unit of backing scale), matching the
+	// Windows DisplayServer convention that hosted JavaFX and the cross-platform
+	// screen metadata rely on. The physical panel DPI macOS derives is not
+	// meaningful for logical layout.
+	return int(screen_get_scale(p_screen) * 96.0f + 0.5f);
 }
 
 float DisplayServerMacOS::screen_get_scale(int p_screen) const {
@@ -1790,8 +1782,21 @@ DisplayServerEnums::WindowID DisplayServerMacOS::create_sub_window(DisplayServer
 	return id;
 }
 
+void DisplayServerMacOS::release_javafx_startup_window(DisplayServerEnums::WindowID p_window) {
+	ERR_FAIL_COND(!windows.has(p_window));
+	if (!windows[p_window].javafx_startup_hidden) {
+		return;
+	}
+	windows[p_window].javafx_startup_hidden = false;
+	show_window(p_window);
+}
+
 void DisplayServerMacOS::show_window(DisplayServerEnums::WindowID p_id) {
 	WindowData &wd = windows[p_id];
+
+	if (wd.javafx_startup_hidden) {
+		return;
+	}
 
 	if (p_id == DisplayServerEnums::MAIN_WINDOW_ID) {
 		[GodotApp activateApplication];
@@ -1811,6 +1816,12 @@ void DisplayServerMacOS::show_window(DisplayServerEnums::WindowID p_id) {
 		}
 	} else {
 		[wd.window_object makeKeyAndOrderFront:nil];
+	}
+	if (!wd.no_focus && !wd.is_popup && ![NSApp isActive] && ![wd.window_object isKeyWindow]) {
+		// AppKit never delivers key-window notifications when the window server
+		// refuses to activate the app; emulate the focus transition instead (see
+		// window_move_to_foreground).
+		window_set_logical_focus(p_id);
 	}
 }
 
@@ -1865,6 +1876,48 @@ void DisplayServerMacOS::window_set_drop_files_callback(const Callable &p_callab
 	ERR_FAIL_COND(!windows.has(p_window));
 	WindowData &wd = windows[p_window];
 	wd.drop_files_callback = p_callable;
+}
+
+Error DisplayServerMacOS::window_set_drag_delegate(DisplayServerEnums::WindowID p_window, DisplayServerMacOSDragDelegate p_delegate, void *p_userdata) {
+	_THREAD_SAFE_METHOD_
+	ERR_FAIL_COND_V(!windows.has(p_window), ERR_INVALID_PARAMETER);
+	WindowData &wd = windows[p_window];
+	// Registering the types can fail on a torn-down view; keep the old delegate then.
+	if (p_delegate) {
+		@try {
+			[wd.window_view registerForDraggedTypes:@[ NSPasteboardTypeString, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypeURL ]];
+		} @catch (NSException *exception) {
+			ERR_FAIL_V_MSG(ERR_CANT_CREATE, vformat("Cannot register drag types: %s", [[exception reason] UTF8String]));
+		}
+	}
+	wd.drag_delegate = p_delegate;
+	wd.drag_delegate_userdata = p_userdata;
+	return OK;
+}
+
+void DisplayServerMacOS::window_set_drag_start_handler(DisplayServerEnums::WindowID p_window, DisplayServerMacOSDragStartHandler p_handler, void *p_userdata) {
+	_THREAD_SAFE_METHOD_
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	wd.drag_start_handler = p_handler;
+	wd.drag_start_userdata = p_userdata;
+}
+
+void DisplayServerMacOS::window_register_drag_types(DisplayServerEnums::WindowID p_window, const Vector<String> &p_types) {
+	_THREAD_SAFE_METHOD_
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	@try {
+		NSMutableArray<NSPasteboardType> *types = [NSMutableArray arrayWithCapacity:p_types.size()];
+		for (int i = 0; i < p_types.size(); i++) {
+			[types addObject:[NSString stringWithUTF8String:p_types[i].utf8().get_data()]];
+		}
+		if ([types count] > 0) {
+			[wd.window_view registerForDraggedTypes:types];
+		}
+	} @catch (NSException *exception) {
+		ERR_PRINT(vformat("Cannot register custom drag types: %s", [[exception reason] UTF8String]));
+	}
 }
 
 void DisplayServerMacOS::window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window) {
@@ -2115,7 +2168,16 @@ void DisplayServerMacOS::window_set_position(const Point2i &p_position, DisplayS
 	offset.y = (nsrect.origin.y + nsrect.size.height);
 	offset.y -= (windowRect.origin.y + windowRect.size.height);
 
-	[wd.window_object setFrameTopLeftPoint:NSMakePoint(position.x - offset.x, position.y - offset.y)];
+	wd.in_set_position = true; // Also tells GodotWindow::constrainFrameRect to skip the menu-bar clamp.
+	// setFrameTopLeftPoint/setFrameOrigin let the window server clamp a
+	// visible window below the menu bar; setFrame: with in_set_position set
+	// honors the requested position. Drags that chase the pointer off the
+	// screen edge (title-bar move, resize grip) rely on that, as on Windows.
+	const NSSize frame_size = windowRect.size;
+	[wd.window_object setFrame:NSMakeRect(position.x - offset.x, position.y - offset.y - frame_size.height, frame_size.width, frame_size.height) display:NO];
+	wd.in_set_position = false;
+	wd.position = p_position;
+	wd.position_valid = true;
 
 	_update_window_style(wd, p_window);
 	update_mouse_pos(wd, [wd.window_object mouseLocationOutsideOfEventStream]);
@@ -2253,7 +2315,13 @@ void DisplayServerMacOS::window_set_size(const Size2i p_size, DisplayServerEnums
 	new_frame.origin.x = top_left.x;
 	new_frame.origin.y = top_left.y - new_frame.size.height;
 
+	// Programmatic resize keeps the requested top-left verbatim: a window
+	// parked above the menu bar (Windows-style offscreen placement, e.g. a
+	// title-bar drag) must not snap back under it when an FX resize grip
+	// grows the frame. See GodotWindow::constrainFrameRect.
+	wd.in_set_position = true;
 	[wd.window_object setFrame:new_frame display:YES];
+	wd.in_set_position = false;
 
 	_update_window_style(wd, p_window);
 }
@@ -2275,6 +2343,65 @@ Size2i DisplayServerMacOS::window_get_size_with_decorations(DisplayServerEnums::
 	return Size2i(frame.size.width, frame.size.height) * screen_get_max_scale();
 }
 
+void DisplayServerMacOS::window_manual_fullscreen_enter(DisplayServerEnums::WindowID p_window) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	if (wd.manual_fullscreen) {
+		return;
+	}
+	NSWindow *window = wd.window_object;
+	// The window server refused the AppKit fullscreen transition (observed on
+	// sessions where app activation is suppressed). Emulate fullscreen with a
+	// screen-sized window whose title bar is hidden; the style mask stays
+	// titled so borderless reporting keeps working.
+	wd.manual_fs_restore = [window frame];
+	wd.manual_fs_stylemask = [window styleMask];
+	wd.manual_fs_level = [window level];
+	wd.manual_fs_titlebar_transparent = [window titlebarAppearsTransparent];
+	wd.manual_fs_title_visibility = [window titleVisibility];
+	if ([window parentWindow]) {
+		[[window parentWindow] removeChildWindow:window];
+	}
+	[window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+	[window setLevel:NSMainMenuWindowLevel + 1];
+	[window setStyleMask:(wd.manual_fs_stylemask | NSWindowStyleMaskFullSizeContentView)];
+	[window setTitlebarAppearsTransparent:YES];
+	[window setTitleVisibility:NSWindowTitleHidden];
+	[[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
+	[[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
+	[[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+	// Must precede setFrame: constrainFrameRect only lets the frame cover the
+	// whole screen while the emulated fullscreen flag is set.
+	wd.manual_fullscreen = true;
+	const NSRect screen_frame = [[window screen] frame];
+	[window setFrame:screen_frame display:YES animate:NO];
+	wd.fullscreen = true;
+	// setFrame triggers windowDidResize, which publishes the new size.
+}
+
+void DisplayServerMacOS::window_manual_fullscreen_exit(DisplayServerEnums::WindowID p_window) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	if (!wd.manual_fullscreen) {
+		return;
+	}
+	NSWindow *window = wd.window_object;
+	wd.manual_fullscreen = false;
+	[window setLevel:wd.manual_fs_level];
+	[window setStyleMask:wd.manual_fs_stylemask];
+	[window setTitlebarAppearsTransparent:wd.manual_fs_titlebar_transparent];
+	[window setTitleVisibility:(NSWindowTitleVisibility)wd.manual_fs_title_visibility];
+	[[window standardWindowButton:NSWindowCloseButton] setHidden:NO];
+	[[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:(wd.no_min_btn && wd.no_max_btn)];
+	[[window standardWindowButton:NSWindowZoomButton] setHidden:(wd.no_min_btn && wd.no_max_btn)];
+	[window setFrame:wd.manual_fs_restore display:YES animate:NO];
+	// setFrame triggers windowDidResize, which publishes the restored size.
+}
+
 void DisplayServerMacOS::window_set_mode(DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::WindowID p_window) {
 	_THREAD_SAFE_METHOD_
 
@@ -2292,6 +2419,9 @@ void DisplayServerMacOS::window_set_mode(DisplayServerEnums::WindowMode p_mode, 
 		} break;
 		case DisplayServerEnums::WINDOW_MODE_MINIMIZED: {
 			[wd.window_object deminiaturize:nil];
+			// The flag clears when the exit animation ends; report the requested
+			// mode synchronously so window_get_mode matches other platforms.
+			wd.minimized = false;
 		} break;
 		case DisplayServerEnums::WINDOW_MODE_EXCLUSIVE_FULLSCREEN:
 		case DisplayServerEnums::WINDOW_MODE_FULLSCREEN: {
@@ -2323,7 +2453,13 @@ void DisplayServerMacOS::window_set_mode(DisplayServerEnums::WindowMode p_mode, 
 				Size2i size = wd.max_size / screen_get_max_scale();
 				[wd.window_object setContentMaxSize:NSMakeSize(size.x, size.y)];
 			}
-			[wd.window_object toggleFullScreen:nil];
+			if (wd.manual_fullscreen) {
+				// The AppKit transition never happened; restore the saved
+				// frame, style and level directly.
+				window_manual_fullscreen_exit(p_window);
+			} else {
+				[wd.window_object toggleFullScreen:nil];
+			}
 
 			if (old_mode == DisplayServerEnums::WINDOW_MODE_EXCLUSIVE_FULLSCREEN) {
 				update_presentation_mode();
@@ -2351,6 +2487,7 @@ void DisplayServerMacOS::window_set_mode(DisplayServerEnums::WindowMode p_mode, 
 		} break;
 		case DisplayServerEnums::WINDOW_MODE_MINIMIZED: {
 			[wd.window_object performMiniaturize:nil];
+			wd.minimized = true;
 		} break;
 		case DisplayServerEnums::WINDOW_MODE_EXCLUSIVE_FULLSCREEN:
 		case DisplayServerEnums::WINDOW_MODE_FULLSCREEN: {
@@ -2359,7 +2496,16 @@ void DisplayServerMacOS::window_set_mode(DisplayServerEnums::WindowMode p_mode, 
 			}
 			[wd.window_object setContentMinSize:NSMakeSize(0, 0)];
 			[wd.window_object setContentMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
-			[wd.window_object toggleFullScreen:nil];
+			if (wd.transient_parent != DisplayServerEnums::INVALID_WINDOW_ID) {
+				// Owned windows detach from their parent for fullscreen, and in
+				// sessions where the window server refuses app activation the
+				// AppKit exit transition never runs after such an enter,
+				// leaving the window stuck on a fullscreen space. Use the
+				// emulated fullscreen in both directions instead.
+				window_manual_fullscreen_enter(p_window);
+			} else {
+				[wd.window_object toggleFullScreen:nil];
+			}
 
 			wd.fullscreen = true;
 			if (p_mode == DisplayServerEnums::WINDOW_MODE_EXCLUSIVE_FULLSCREEN) {
@@ -2400,10 +2546,8 @@ DisplayServerEnums::WindowMode DisplayServerMacOS::window_get_mode(DisplayServer
 	if (NSEqualRects([wd.window_object frame], [[wd.window_object screen] visibleFrame])) {
 		return DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
 	}
-	if ([wd.window_object respondsToSelector:@selector(isMiniaturized)]) {
-		if ([wd.window_object isMiniaturized]) {
-			return DisplayServerEnums::WINDOW_MODE_MINIMIZED;
-		}
+	if (wd.minimized) {
+		return DisplayServerEnums::WINDOW_MODE_MINIMIZED;
 	}
 
 	// All other discarded, return windowed.
@@ -2769,6 +2913,44 @@ void DisplayServerMacOS::window_move_to_foreground(DisplayServerEnums::WindowID 
 	} else {
 		[wd.window_object makeKeyAndOrderFront:nil];
 	}
+	if (!wd.no_focus && !wd.is_popup && ![NSApp isActive] && ![wd.window_object isKeyWindow]) {
+		// The window server refuses to activate the app in this session (e.g.
+		// activation-restricted CI contexts), so AppKit never delivers key-window
+		// notifications. Emulate the focus transition to keep Godot's logical
+		// focus state consistent with the foreground request, matching the
+		// synchronous focus semantics other platforms provide.
+		window_set_logical_focus(p_window);
+	}
+}
+
+void DisplayServerMacOS::window_set_logical_focus(DisplayServerEnums::WindowID p_window) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	if (wd.focused) {
+		return;
+	}
+	for (KeyValue<DisplayServerEnums::WindowID, WindowData> &entry : windows) {
+		if (entry.key != p_window && entry.value.focused) {
+			entry.value.focused = false;
+			AccessibilityServer::get_singleton()->set_window_focused(entry.key, false);
+			send_window_event(entry.value, DisplayServerEnums::WINDOW_EVENT_FOCUS_OUT);
+		}
+	}
+	wd.focused = true;
+	set_last_focused_window(p_window);
+	AccessibilityServer::get_singleton()->set_window_focused(p_window, true);
+	send_window_event(wd, DisplayServerEnums::WINDOW_EVENT_FOCUS_IN);
+}
+
+void DisplayServerMacOS::window_set_ignore_mouse_events(DisplayServerEnums::WindowID p_window, bool p_ignore) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+	wd.ignore_mouse_events_override = p_ignore;
+	[wd.window_object setIgnoresMouseEvents:p_ignore];
 }
 
 bool DisplayServerMacOS::window_is_focused(DisplayServerEnums::WindowID p_window) const {
@@ -2819,6 +3001,15 @@ void DisplayServerMacOS::window_set_ime_position(const Point2i &p_pos, DisplaySe
 	WindowData &wd = windows[p_window];
 
 	wd.im_position = p_pos;
+}
+
+void DisplayServerMacOS::window_commit_ime_composition(DisplayServerEnums::WindowID p_window) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND(!windows.has(p_window));
+	WindowData &wd = windows[p_window];
+
+	[wd.window_view commitComposition];
 }
 
 DisplayServerEnums::WindowID DisplayServerMacOS::get_window_at_screen_position(const Point2i &p_position) const {
@@ -3297,6 +3488,11 @@ void DisplayServerMacOS::_process_events(bool p_pump) {
 
 	for (KeyValue<DisplayServerEnums::WindowID, WindowData> &E : windows) {
 		WindowData &wd = E.value;
+		if (wd.ignore_mouse_events_override) {
+			// Owned by the JavaFX host's modal input gate; the passthrough
+			// sweep must not re-derive this window's ignoresMouseEvents.
+			continue;
+		}
 		if (wd.mpass) {
 			if (![wd.window_object ignoresMouseEvents]) {
 				[wd.window_object setIgnoresMouseEvents:YES];
@@ -3745,6 +3941,8 @@ bool DisplayServerMacOS::mouse_process_popups(bool p_close) {
 }
 
 DisplayServerMacOS::DisplayServerMacOS(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
+	const String startup = OS::get_singleton()->get_environment("GODOT_JFX_STARTUP");
+	javafx_startup_enabled = p_context == DisplayServerEnums::CONTEXT_ENGINE && (startup == "logo" || startup == "hidden");
 	Input::get_singleton()->set_event_dispatch_function(_dispatch_input_events);
 
 	r_error = OK;

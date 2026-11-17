@@ -79,4 +79,25 @@
 	return !wd.no_focus && !wd.is_popup;
 }
 
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
+	// Emulated fullscreen covers the whole screen, including the menu bar and
+	// Dock areas that AppKit would otherwise keep clear.
+	DisplayServerMacOS *ds = (DisplayServerMacOS *)DisplayServer::get_singleton();
+	if (ds && ds->has_window(window_id)) {
+		DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
+		// Programmatic window_set_position must be honored verbatim (setFrame:
+		// still routes through this constraint): Windows lets a window be
+		// placed above the menu bar / off the screen edge, and pointer-chasing
+		// drags (title-bar move, resize grip) rely on that. AppKit also re-runs
+		// this constraint on the unchanged frame by itself (makeKey, style
+		// updates, ...); keep the current frame then so such placements are
+		// not silently undone. Genuine user titlebar drags pass a changing
+		// frame and stay constrained to the menu bar.
+		if (wd.manual_fullscreen || wd.in_set_position || NSEqualRects(frameRect, [self frame])) {
+			return frameRect;
+		}
+	}
+	return [super constrainFrameRect:frameRect toScreen:screen];
+}
+
 @end

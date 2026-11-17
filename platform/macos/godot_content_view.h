@@ -77,6 +77,7 @@ GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wdeprecated-declarations") // OpenGL is de
 - (void)setWindowID:(DisplayServerEnums::WindowID)wid;
 - (void)updateLayerDelegate;
 - (void)cancelComposition;
+- (void)commitComposition;
 
 @end
 

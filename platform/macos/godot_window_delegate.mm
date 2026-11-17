@@ -107,6 +107,8 @@
 
 	DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
 	wd.fs_transition = false;
+	// The window server refused the transition; emulate fullscreen instead.
+	ds->window_manual_fullscreen_enter(window_id);
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
@@ -272,6 +274,11 @@
 	const float scale = ds->screen_get_max_scale();
 	wd.size.width = content_rect.size.width * scale;
 	wd.size.height = content_rect.size.height * scale;
+	// A frame change can arrive with only a resize notification (observed for
+	// AppKit-driven maximize on the hosted window); keep the recorded
+	// position in sync too, the pointer-event anchoring reads it.
+	wd.position = ds->window_get_position(window_id);
+	wd.position_valid = true;
 
 	CALayer *layer = [wd.window_view layer];
 	if (layer) {
@@ -301,9 +308,30 @@
 	DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
 	ds->release_pressed_events();
 
+	if (!wd.in_set_position && wd.position_valid && [wd.window_object parentWindow] != nil) {
+		// Attached child window: the Godot/JavaFX side owns the position
+		// (matching the Windows owned-window model, where the OS never moves
+		// owned windows). AppKit re-anchors child windows on its own in some
+		// sessions; snap those moves back instead of feeding them into scene
+		// state. Genuine user titlebar drags are accepted as feedback.
+		NSEvent *event = [NSApp currentEvent];
+		const bool user_drag = event != nil && [event window] == wd.window_object &&
+				([event type] == NSEventTypeLeftMouseDragged || [event type] == NSEventTypeLeftMouseDown);
+		if (!user_drag && ds->window_get_position(window_id) != wd.position) {
+			ds->window_set_position(wd.position, window_id);
+			return;
+		}
+	}
+
 	if (wd.rect_changed_callback.is_valid()) {
 		wd.rect_changed_callback.call(Rect2i(ds->window_get_position(window_id), ds->window_get_size(window_id)));
 	}
+	// Keep the recorded position in sync with moves that did not go through
+	// window_set_position (AppKit zoom/maximize, user titlebar drags); the
+	// pointer-event anchoring in GodotContentView reads it to reconstruct
+	// local coordinates.
+	wd.position = ds->window_get_position(window_id);
+	wd.position_valid = true;
 }
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
@@ -361,6 +389,7 @@
 
 	DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
 
+	wd.minimized = true;
 	wd.focused = false;
 	ds->release_pressed_events();
 	AccessibilityServer::get_singleton()->set_window_focused(window_id, false);
@@ -374,6 +403,7 @@
 	}
 
 	DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
+	wd.minimized = false;
 	wd.is_visible = ([wd.window_object occlusionState] & NSWindowOcclusionStateVisible) && [wd.window_object isVisible];
 	if ([wd.window_object isKeyWindow]) {
 		wd.focused = true;

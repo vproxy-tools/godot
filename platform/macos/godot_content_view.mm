@@ -279,6 +279,17 @@
 	[[NSTextInputContext currentInputContext] discardMarkedText];
 }
 
+- (void)commitComposition {
+	// Commits the in-progress marked text as regular input, mirroring the IME
+	// "complete composition" request other platforms expose to the host.
+	if (marked_text.length == 0) {
+		return;
+	}
+	NSAttributedString *committed = [[NSAttributedString alloc] initWithAttributedString:marked_text];
+	[[NSTextInputContext currentInputContext] discardMarkedText];
+	[self insertText:committed];
+}
+
 - (void)insertText:(id)aString {
 	[self insertText:aString replacementRange:NSMakeRange(0, 0)];
 }
@@ -337,15 +348,88 @@
 
 // MARK: Drag and drop
 
+// The JavaFX host module installs a per-window drag delegate
+// (DisplayServerMacOS::window_set_drag_delegate). When present it decides the
+// drag feedback and consumes the drop; otherwise the historical file-drop
+// behavior below applies. Effects cross the delegate boundary in the Windows
+// DROPEFFECT bit layout (1 copy, 2 move, 4 link) so the module can share one
+// action encoding with its Windows backend.
+
+static uint32_t godot_dropeffect_from_nsdragoperation(NSDragOperation p_operation) {
+	uint32_t effect = 0;
+	if (p_operation & (NSDragOperationCopy | NSDragOperationGeneric)) {
+		effect |= 1;
+	}
+	if (p_operation & NSDragOperationMove) {
+		effect |= 2;
+	}
+	if (p_operation & NSDragOperationLink) {
+		effect |= 4;
+	}
+	return effect;
+}
+
+static NSDragOperation godot_nsdragoperation_from_dropeffect(uint32_t p_effect) {
+	NSDragOperation operation = NSDragOperationNone;
+	if (p_effect & 1) {
+		operation |= NSDragOperationCopy;
+	}
+	if (p_effect & 2) {
+		operation |= NSDragOperationMove;
+	}
+	if (p_effect & 4) {
+		operation |= NSDragOperationLink;
+	}
+	return operation;
+}
+
+// Dragging location in Godot screen coordinates (physical pixels, y down),
+// matching how the host reports mouse positions: window origin plus the
+// local content-view position.
+- (BOOL)godot_drag_delegate_event:(id<NSDraggingInfo>)sender kind:(int)p_kind effect:(uint32_t *)r_effect {
+	DisplayServerMacOS *ds = (DisplayServerMacOS *)DisplayServer::get_singleton();
+	if (!ds || !ds->has_window(window_id)) {
+		return NO;
+	}
+	DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
+	if (!wd.drag_delegate) {
+		return NO;
+	}
+	const NSPoint view_point = [sender draggingLocation];
+	const float scale = ds->screen_get_max_scale();
+	const Point2i origin = ds->window_get_position(window_id);
+	const int sx = origin.x + int(view_point.x * scale);
+	const int sy = origin.y + int(([self frame].size.height - view_point.y) * scale);
+	return wd.drag_delegate(wd.drag_delegate_userdata, p_kind, (__bridge void *)sender, sx, sy, r_effect) ? YES : NO;
+}
+
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+	uint32_t effect = godot_dropeffect_from_nsdragoperation([sender draggingSourceOperationMask]);
+	if ([self godot_drag_delegate_event:sender kind:1 effect:&effect]) {
+		return godot_nsdragoperation_from_dropeffect(effect);
+	}
 	return NSDragOperationCopy;
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+	uint32_t effect = godot_dropeffect_from_nsdragoperation([sender draggingSourceOperationMask]);
+	if ([self godot_drag_delegate_event:sender kind:2 effect:&effect]) {
+		return godot_nsdragoperation_from_dropeffect(effect);
+	}
 	return NSDragOperationCopy;
 }
 
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+	uint32_t effect = 0;
+	[self godot_drag_delegate_event:sender kind:3 effect:&effect];
+}
+
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+	uint32_t effect = godot_dropeffect_from_nsdragoperation([sender draggingSourceOperationMask]);
+	if ([self godot_drag_delegate_event:sender kind:4 effect:&effect]) {
+		return YES;
+	}
+
 	DisplayServerMacOS *ds = (DisplayServerMacOS *)DisplayServer::get_singleton();
 	if (!ds || !ds->has_window(window_id)) {
 		return NO;
@@ -451,6 +535,18 @@
 	DisplayServerMacOS *ds = (DisplayServerMacOS *)DisplayServer::get_singleton();
 	if (ds && ds->has_window(window_id)) {
 		DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
+		if (wd.drag_start_handler) {
+			// One-shot: a module-queued drag source starts its AppKit session
+			// here, inside real event dispatch, so the session tracks the
+			// physical button (see DisplayServerMacOSDragStartHandler).
+			DisplayServerMacOSDragStartHandler handler = wd.drag_start_handler;
+			void *userdata = wd.drag_start_userdata;
+			wd.drag_start_handler = nullptr;
+			wd.drag_start_userdata = nullptr;
+			if (handler(userdata, event, self)) {
+				return; // The dragging session owns the mouse now.
+			}
+		}
 		if (wd.edge != DisplayServerEnums::WINDOW_EDGE_MAX) {
 			Size2i max_size = wd.max_size / ds->screen_get_max_scale();
 			Size2i min_size = wd.min_size / ds->screen_get_max_scale();
@@ -506,6 +602,16 @@
 	if (ds && ds->has_window(window_id)) {
 		DisplayServerMacOS::WindowData &wd = ds->get_window(window_id);
 		wd.edge = DisplayServerEnums::WINDOW_EDGE_MAX;
+		if (wd.drag_start_handler) {
+			// The button went up before any real mouseDragged could start the
+			// queued drag session: cancel it (nil event) so a later unrelated
+			// drag never fires the stale session.
+			DisplayServerMacOSDragStartHandler handler = wd.drag_start_handler;
+			void *userdata = wd.drag_start_userdata;
+			wd.drag_start_handler = nullptr;
+			wd.drag_start_userdata = nullptr;
+			handler(userdata, nil, self);
+		}
 	}
 	if (mouse_down_control) {
 		[self processMouseEvent:event index:MouseButton::RIGHT pressed:false outofstream:false];
@@ -525,6 +631,33 @@
 	NSPoint delta = NSMakePoint([event deltaX], [event deltaY]);
 	NSPoint mpos = [event locationInWindow];
 
+	// locationInWindow is resolved against the AppKit frame when the event is
+	// delivered, but a window chasing the pointer (title-bar drag, resize
+	// grip) moves between posting and delivery, and setFrameTopLeftPoint is
+	// clamped onscreen while the recorded position follows the request. The
+	// wrapped CGEvent carries the global location from posting time; anchor
+	// it to the recorded position so the local position and the screen
+	// coordinates consumers reconstruct from it match what was posted (the
+	// semantics Windows gets from client coordinates fixed at post time).
+	CGEventRef cg_event = [event CGEvent];
+	if (cg_event) {
+		// wd.position can lag the true frame when AppKit moves the window
+		// without window_set_position (zoom/maximize may arrive resize-only).
+		// Button-less motion means no drag chase is in flight, so resyncing
+		// from the live frame here is safe and keeps the anchor accurate.
+		if (wd.position_valid && [event type] == NSEventTypeMouseMoved) {
+			Point2i actual = ds->window_get_position(window_id);
+			if (actual != wd.position) {
+				wd.position = actual;
+			}
+		}
+		const CGPoint global = CGEventGetLocation(cg_event);
+		const float scale = ds->screen_get_max_scale();
+		const NSRect content_rect = [wd.window_view frame];
+		mpos = NSMakePoint(global.x - wd.position.x / scale,
+				content_rect.size.height - (global.y - wd.position.y / scale));
+	}
+
 	if (ds->update_mouse_wrap(wd, delta, mpos, [event timestamp])) {
 		return;
 	}
@@ -533,7 +666,23 @@
 	mm.instantiate();
 
 	mm->set_window_id(window_id);
-	mm->set_button_mask(ds->mouse_get_button_state());
+	// [NSEvent pressedMouseButtons] (via mouse_get_button_state()) reports the
+	// state at processing time; a press posted right after a move would leak
+	// into that move and a release posted right after a drag would cancel it.
+	// The event type is assigned at event time, so it carries the correct
+	// button state for tightly sequenced synthesized (robot) input. Multiple
+	// simultaneously held buttons still report only the dragged type's button,
+	// which macOS itself cannot disambiguate in the event type either.
+	NSEventType motion_type = [event type];
+	BitField<MouseButtonMask> motion_mask = MouseButtonMask::NONE;
+	if (motion_type == NSEventTypeLeftMouseDragged) {
+		motion_mask.set_flag(MouseButtonMask::LEFT);
+	} else if (motion_type == NSEventTypeRightMouseDragged) {
+		motion_mask.set_flag(MouseButtonMask::RIGHT);
+	} else if (motion_type == NSEventTypeOtherMouseDragged) {
+		motion_mask.set_flag(MouseButtonMask::MIDDLE);
+	}
+	mm->set_button_mask(motion_mask);
 	ds->update_mouse_pos(wd, mpos);
 	mm->set_position(wd.mouse_pos);
 	mm->set_pressure([event pressure]);
