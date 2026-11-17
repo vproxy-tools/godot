@@ -1054,6 +1054,7 @@ static NSDragOperation godot_nsdragoperation_from_dropeffect(uint32_t p_effect) 
 		delta_y = [event scrollingDeltaY];
 	}
 
+
 	if ([event momentumPhase] != NSEventPhaseNone) {
 		if (ignore_momentum_scroll) {
 			return;
@@ -1067,6 +1068,15 @@ static NSDragOperation godot_nsdragoperation_from_dropeffect(uint32_t p_effect) 
 	} else {
 		double delta_x_abs = Math::abs(delta_x);
 		double delta_y_abs = Math::abs(delta_y);
+		if ([event hasPreciseScrollingDeltas]) {
+			// Smooth-scrolling wheel mice report precise point deltas instead of
+			// line deltas. Normalize to the line units the wheel-button factor
+			// conventionally carries (AppKit: ten points per line), so classic
+			// and smooth wheels scroll at the same rate here and in consumers
+			// like the JavaFX host.
+			delta_x_abs *= 0.1;
+			delta_y_abs *= 0.1;
+		}
 
 		if (!Math::is_zero_approx(delta_x_abs)) {
 			[self processScrollEvent:event button:(0 > delta_x ? MouseButton::WHEEL_RIGHT : MouseButton::WHEEL_LEFT) factor:delta_x_abs];
