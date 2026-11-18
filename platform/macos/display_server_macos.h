@@ -378,7 +378,7 @@ public:
 	virtual DisplayServerEnums::WindowID create_sub_window(DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Rect2i &p_rect = Rect2i(), bool p_exclusive = false, DisplayServerEnums::WindowID p_transient_parent = DisplayServerEnums::INVALID_WINDOW_ID) override;
 	virtual void show_window(DisplayServerEnums::WindowID p_id) override;
 	// Shows a window that was created hidden while the embedded JavaFX runtime
-	// starts up (GODOT_JFX_STARTUP); a no-op for every other window.
+	// starts up (--javafx-startup); a no-op for every other window.
 	void release_javafx_startup_window(DisplayServerEnums::WindowID p_window);
 	// Emulated fullscreen for windows whose AppKit fullscreen transition the
 	// window server refused; enter restores nothing until exit is requested.

@@ -3941,8 +3941,15 @@ bool DisplayServerMacOS::mouse_process_popups(bool p_close) {
 }
 
 DisplayServerMacOS::DisplayServerMacOS(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
-	const String startup = OS::get_singleton()->get_environment("GODOT_JFX_STARTUP");
-	javafx_startup_enabled = p_context == DisplayServerEnums::CONTEXT_ENGINE && (startup == "logo" || startup == "hidden");
+#ifdef LIBGODOT_ENABLED
+	for (const String &arg : OS::get_singleton()->get_cmdline_user_args()) {
+		if (arg.begins_with("--javafx-startup=")) {
+			javafx_startup_enabled = p_context == DisplayServerEnums::CONTEXT_ENGINE &&
+					(arg == "--javafx-startup=logo" || arg == "--javafx-startup=hidden");
+			break;
+		}
+	}
+#endif
 	Input::get_singleton()->set_event_dispatch_function(_dispatch_input_events);
 
 	r_error = OK;
