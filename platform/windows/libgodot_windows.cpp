@@ -41,10 +41,20 @@ static GodotInstance *instance = nullptr;
 GDExtensionObjectPtr libgodot_create_godot_instance(int p_argc, char *p_argv[], GDExtensionInitializationFunction p_init_func) {
 	ERR_FAIL_COND_V_MSG(instance != nullptr, nullptr, "Only one Godot Instance may be created at a time.");
 
-	os = new OS_Windows(GetModuleHandle(nullptr));
+	HMODULE module = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&libgodot_create_godot_instance), &module)) {
+		return nullptr;
+	}
+	// Match the standalone host before Godot creates its first window.
+	// Windows applies this setting to the embedding process for its lifetime.
+	DisableProcessWindowsGhosting();
+	os = new OS_Windows(module);
 
 	Error err = Main::setup(p_argv[0], p_argc - 1, &p_argv[1], false);
 	if (err != OK) {
+		delete os;
+		os = nullptr;
 		return nullptr;
 	}
 
@@ -66,5 +76,7 @@ void libgodot_destroy_godot_instance(GDExtensionObjectPtr p_godot_instance) {
 		// Note: When Godot Engine supports reinitialization, clear the instance pointer here.
 		//instance = nullptr;
 		Main::cleanup();
+		delete os;
+		os = nullptr;
 	}
 }

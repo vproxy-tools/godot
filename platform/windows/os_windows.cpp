@@ -2058,7 +2058,7 @@ String OS_Windows::get_system_font_path(const String &p_font_name, int p_weight,
 
 String OS_Windows::get_executable_path() const {
 	WCHAR bufname[4096];
-	GetModuleFileNameW(nullptr, bufname, 4096);
+	GetModuleFileNameW(hInstance, bufname, 4096);
 	String s = String::utf16((const char16_t *)bufname).replace_char('\\', '/');
 	return s;
 }
@@ -2914,6 +2914,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 
 	_init_encodings();
 
+#ifndef LIBGODOT_ENABLED
 	// Reset CWD to ensure long path is used.
 	Char16String current_dir_name;
 	size_t str_len = GetCurrentDirectoryW(0, nullptr);
@@ -2933,6 +2934,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
+#endif // LIBGODOT_ENABLED
 
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -2947,6 +2949,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 
 	DisplayServerWindows::register_windows_driver();
 
+#ifndef LIBGODOT_ENABLED
 	// Enable ANSI escape code support on Windows 10 v1607 (Anniversary Update) and later.
 	// This lets the engine and projects use ANSI escape codes to color text just like on macOS and Linux.
 	//
@@ -2960,6 +2963,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 		// Windows 10 prior to Anniversary Update.
 		print_verbose("Can't set the ENABLE_VIRTUAL_TERMINAL_PROCESSING Windows console mode. `print_rich()` will not work as expected.");
 	}
+#endif
 
 	Vector<Logger *> loggers;
 	loggers.push_back(memnew(WindowsTerminalLogger));

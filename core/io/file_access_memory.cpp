@@ -56,6 +56,7 @@ void FileAccessMemory::cleanup() {
 	}
 
 	memdelete(files);
+	files = nullptr;
 }
 
 Ref<FileAccess> FileAccessMemory::create() {
@@ -77,13 +78,17 @@ Error FileAccessMemory::open_custom(const uint8_t *p_data, uint64_t p_len) {
 }
 
 Error FileAccessMemory::open_internal(const String &p_path, int p_mode_flags) {
-	ERR_FAIL_NULL_V(files, ERR_FILE_NOT_FOUND);
+	if (!files) {
+		return ERR_FILE_NOT_FOUND;
+	}
 
 	String name = fix_path(p_path);
 	//name = DirAccess::normalize_path(name);
 
 	HashMap<String, Vector<uint8_t>>::Iterator E = files->find(name);
-	ERR_FAIL_COND_V_MSG(!E, ERR_FILE_NOT_FOUND, vformat("Can't find file '%s'.", p_path));
+	if (!E) {
+		return ERR_FILE_NOT_FOUND;
+	}
 
 	data = E->value.ptrw();
 	length = E->value.size();

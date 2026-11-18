@@ -981,6 +981,15 @@ int Main::test_entrypoint(int argc, char *argv[], bool &tests_need_run) {
  *   in help, it's a bit messy and should be globalized with the setup() parsing somehow.
  */
 
+static void startup_alert(const String &p_message) {
+#ifdef LIBGODOT_ENABLED
+	// The embedding application reports startup failure to its caller.
+	OS::get_singleton()->printerr("%s\n", p_message.utf8().get_data());
+#else
+	OS::get_singleton()->alert(p_message);
+#endif
+}
+
 Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_phase) {
 	GodotProfileZone("setup");
 	Thread::make_main_thread();
@@ -1061,6 +1070,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 	String audio_driver = "";
 	String project_path = ".";
+	bool projectless_host = false;
 
 #if defined(DEBUG_ENABLED) || defined(TOOLS_ENABLED)
 	String debug_uri = "";
@@ -1728,14 +1738,24 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #endif // MODULE_GDSCRIPT_ENABLED
 #endif // TOOLS_ENABLED
 
+#ifdef LIBGODOT_ENABLED
+		} else if (arg == "--javafx-no-project") {
+			projectless_host = true;
+			project_path.clear();
+#endif
 		} else if (arg == "--path") { // set path of project to start or edit
 #if defined(OVERRIDE_PATH_ENABLED)
 			if (N) {
 				String p = N->get();
+#ifdef LIBGODOT_ENABLED
+				// The embedding application owns the process working directory.
+				project_path = p.is_absolute_path() ? p : OS::get_singleton()->get_cwd().path_join(p);
+#else
 				if (OS::get_singleton()->set_cwd(p) != OK) {
 					OS::get_singleton()->print("Invalid project path specified: \"%s\", aborting.\n", p.utf8().get_data());
 					goto error;
 				}
+#endif
 				N = N->next();
 			} else {
 				OS::get_singleton()->print("Missing relative or absolute path, aborting.\n");
@@ -2086,7 +2106,11 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #endif // defined(DEBUG_ENABLED) || defined (TOOLS_ENABLED)
 
 	OS::get_singleton()->_in_editor = editor;
-	if (globals->setup(project_path, main_pack, false, editor) == OK) {
+	if (projectless_host) {
+		globals->set_setting("application/config/name", "Godot JavaFX");
+		globals->set_setting("display/window/per_pixel_transparency/allowed", true);
+	}
+	if (globals->setup(project_path, main_pack, false, editor || projectless_host) == OK) {
 #ifdef TOOLS_ENABLED
 		found_project = true;
 #endif
@@ -2111,7 +2135,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #endif
 		ERR_PRINT(error_msg);
 
-		OS::get_singleton()->alert(error_msg);
+		startup_alert(error_msg);
 
 		goto error;
 #endif
@@ -2338,13 +2362,13 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		OS::get_singleton()->add_logger(memnew(RotatedFileLogger(base_path, max_files)));
 	}
 
-	if (main_args.is_empty() && String(GLOBAL_GET("application/run/main_scene")) == "") {
+	if (!projectless_host && main_args.is_empty() && String(GLOBAL_GET("application/run/main_scene")) == "") {
 #ifdef TOOLS_ENABLED
 		if (!editor && !project_manager) {
 #endif
 			const String error_msg = "Error: Can't run project: no main scene defined in the project.\n";
 			OS::get_singleton()->print("%s", error_msg.utf8().get_data());
-			OS::get_singleton()->alert(error_msg);
+			startup_alert(error_msg);
 			goto error;
 #ifdef TOOLS_ENABLED
 		}
@@ -4376,7 +4400,7 @@ int Main::start() {
 		if (main_scene.begins_with("uid://")) {
 			ResourceUID::ID id = ResourceUID::get_singleton()->text_to_id(main_scene);
 			if (!editor && !ResourceUID::get_singleton()->has_id(id) && !FileAccess::exists(ResourceUID::get_singleton()->get_cache_file())) {
-				OS::get_singleton()->alert("Main scene's path could not be resolved from UID. Make sure the project is imported first. Aborting.");
+				startup_alert("Main scene's path could not be resolved from UID. Make sure the project is imported first. Aborting.");
 				ERR_FAIL_V_MSG(EXIT_FAILURE, "Main scene's path could not be resolved from UID. Make sure the project is imported first. Aborting.");
 			}
 			game_path = ResourceUID::get_singleton()->get_id_path(id);
@@ -4391,7 +4415,7 @@ int Main::start() {
 		// Let's throw an error gently. The code leading to this is pretty brittle so
 		// this might end up triggered by valid usage, in which case we'll have to
 		// fine-tune further.
-		OS::get_singleton()->alert("Couldn't detect whether to run the editor, the project manager or a specific project. Aborting.");
+		startup_alert("Couldn't detect whether to run the editor, the project manager or a specific project. Aborting.");
 		ERR_FAIL_V_MSG(EXIT_FAILURE, "Couldn't detect whether to run the editor, the project manager or a specific project. Aborting.");
 	}
 #endif
@@ -4418,7 +4442,7 @@ int Main::start() {
 			MainLoop *script_loop = Object::cast_to<MainLoop>(obj);
 			if (!script_loop) {
 				memdelete(obj);
-				OS::get_singleton()->alert(vformat("Can't load the script \"%s\" as it doesn't inherit from SceneTree or MainLoop.", script));
+				startup_alert(vformat("Can't load the script \"%s\" as it doesn't inherit from SceneTree or MainLoop.", script));
 				ERR_FAIL_V_MSG(EXIT_FAILURE, vformat("Can't load the script \"%s\" as it doesn't inherit from SceneTree or MainLoop.", script));
 			}
 
@@ -4432,7 +4456,7 @@ int Main::start() {
 			String script_path = ScriptServer::get_global_class_path(main_loop_type);
 			Ref<Script> script_res = ResourceLoader::load(script_path);
 			if (script_res.is_null()) {
-				OS::get_singleton()->alert("Error: Could not load MainLoop script type: " + main_loop_type);
+				startup_alert("Error: Could not load MainLoop script type: " + main_loop_type);
 				ERR_FAIL_V_MSG(EXIT_FAILURE, vformat("Could not load global class %s.", main_loop_type));
 			}
 			StringName script_base = script_res->get_instance_base_type();
@@ -4440,7 +4464,7 @@ int Main::start() {
 			MainLoop *script_loop = Object::cast_to<MainLoop>(obj);
 			if (!script_loop) {
 				memdelete(obj);
-				OS::get_singleton()->alert("Error: Invalid MainLoop script base type: " + script_base);
+				startup_alert("Error: Invalid MainLoop script base type: " + script_base);
 				ERR_FAIL_V_MSG(EXIT_FAILURE, vformat("The global class %s does not inherit from SceneTree or MainLoop.", main_loop_type));
 			}
 			script_loop->set_script(script_res);
@@ -4454,7 +4478,7 @@ int Main::start() {
 
 	if (!main_loop) {
 		if (!ClassDB::class_exists(main_loop_type)) {
-			OS::get_singleton()->alert("Error: MainLoop type doesn't exist: " + main_loop_type);
+			startup_alert("Error: MainLoop type doesn't exist: " + main_loop_type);
 			return EXIT_FAILURE;
 		} else {
 			Object *ml = ClassDB::instantiate(main_loop_type);

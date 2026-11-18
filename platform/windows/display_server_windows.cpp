@@ -1169,9 +1169,14 @@ String DisplayServerWindows::clipboard_get() const {
 	}
 
 	String ret;
-	if (!OpenClipboard(windows[DisplayServerEnums::MAIN_WINDOW_ID].hWnd)) {
-		ERR_FAIL_V_MSG("", "Unable to open clipboard.");
+	HWND owner = windows[DisplayServerEnums::MAIN_WINDOW_ID].hWnd;
+	BOOL opened = OpenClipboard(owner);
+	// A clipboard listener may still be reading the previous update.
+	for (int retry = 0; !opened && retry < 10; ++retry) {
+		Sleep(5);
+		opened = OpenClipboard(owner);
 	}
+	ERR_FAIL_COND_V_MSG(!opened, String(), "Unable to open clipboard.");
 
 	if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
 		HGLOBAL mem = GetClipboardData(CF_UNICODETEXT);
@@ -3433,7 +3438,8 @@ void DisplayServerWindows::cursor_set_shape(DisplayServerEnums::CursorShape p_sh
 	if (cursors_cache.has(p_shape)) {
 		SetCursor(cursors[p_shape]);
 	} else {
-		SetCursor(LoadCursor(hInstance, win_cursors[p_shape]));
+		// Predefined IDC_* cursors belong to Windows, including in a DLL host.
+		SetCursor(LoadCursor(nullptr, win_cursors[p_shape]));
 	}
 
 	cursor_shape = p_shape;
@@ -7937,7 +7943,12 @@ void DisplayServerWindows::tablet_set_current_driver(const String &p_driver) {
 }
 
 DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
-	const String startup = OS::get_singleton()->get_environment("GODOT_JFX_STARTUP");
+	String startup = OS::get_singleton()->get_environment("GODOT_JFX_STARTUP");
+#ifdef LIBGODOT_ENABLED
+	for (const String &arg : OS::get_singleton()->get_cmdline_user_args()) {
+		if (arg.begins_with("--javafx-startup=")) startup = arg.trim_prefix("--javafx-startup=");
+	}
+#endif
 	javafx_startup_enabled = p_context == DisplayServerEnums::CONTEXT_ENGINE && (startup == "logo" || startup == "hidden");
 	KeyMappingWindows::initialize();
 

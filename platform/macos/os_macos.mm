@@ -62,6 +62,11 @@
 #include <sys/sysctl.h>
 
 void OS_MacOS::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
+#ifdef LIBGODOT_ENABLED
+	// The library caller pumps events on each iteration. There is no
+	// NSApp.run observer waiting for a timer to schedule the next frame.
+	OS_Unix::add_frame_delay(p_can_draw, false);
+#else
 	bool wake_for_events = p_wake_for_events;
 	if (!wake_for_events) {
 		NSArray<NSRunningApplication *> *proc_array = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.crowdcafe.windowmagnet"];
@@ -88,10 +93,13 @@ void OS_MacOS::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
 		return;
 	}
 	OS_Unix::add_frame_delay(p_can_draw, wake_for_events);
+#endif
 }
 
 void OS_MacOS::initialize() {
+#ifndef LIBGODOT_ENABLED
 	crash_handler.initialize();
+#endif
 
 	initialize_core();
 }
@@ -1085,11 +1093,13 @@ void OS_MacOS_NSApp::run() {
 
 static bool sig_received = false;
 
+#ifndef LIBGODOT_ENABLED
 static void handle_interrupt(int sig) {
 	if (sig == SIGINT) {
 		sig_received = true;
 	}
 }
+#endif
 
 void OS_MacOS_NSApp::start_main() {
 	Error err;
@@ -1199,11 +1209,22 @@ OS_MacOS_NSApp::OS_MacOS_NSApp(const char *p_execpath, int p_argc, char **p_argv
 	[NSApp setDelegate:delegate];
 	[NSApp registerUserInterfaceItemSearchHandler:delegate];
 
+#ifndef LIBGODOT_ENABLED
 	struct sigaction action;
 	memset(&action, 0, sizeof(action));
 	action.sa_handler = handle_interrupt;
 	sigaction(SIGINT, &action, nullptr);
+#endif
 }
+
+#ifdef LIBGODOT_ENABLED
+OS_MacOS_NSApp::~OS_MacOS_NSApp() {
+	[NSApp unregisterUserInterfaceItemSearchHandler:delegate];
+	if ([NSApp delegate] == delegate) {
+		[NSApp setDelegate:nil];
+	}
+}
+#endif
 
 // MARK: - OS_MacOS_Headless
 

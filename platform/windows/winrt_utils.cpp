@@ -350,8 +350,12 @@ void WinRTUtils::destroy_queue() {
 	notifications.clear();
 
 	// Shutdown queue.
+	// Release the controller on its owning apartment before this thread exits.
+	// A library host can outlive this apartment and unload the DLL on another thread.
+	ComPtr<RODispatcherQueueController> controller;
+	controller.Attach(queue_ctrl.Detach());
 	ComPtr<ROAsyncAction> action;
-	ERR_FAIL_COND(FAILED(queue_ctrl->ShutdownQueueAsync((void **)action.GetAddressOf())));
+	ERR_FAIL_COND(FAILED(controller->ShutdownQueueAsync((void **)action.GetAddressOf())));
 
 	ComPtr<ROAsyncInfo> info;
 	ERR_FAIL_COND(FAILED(action.As(&info)));

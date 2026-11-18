@@ -36,6 +36,9 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/file_access_pack.h"
+#ifdef LIBGODOT_ENABLED
+#include "core/io/file_access_memory.h"
+#endif
 #include "core/io/marshalls.h"
 #include "core/io/resource_uid.h"
 #include "core/object/callable_mp.h"
@@ -691,6 +694,17 @@ void ProjectSettings::_handle_editor_setting_compat(const String &p_original_set
  *    If nothing was found, error out.
  */
 Error ProjectSettings::_setup(const String &p_path, const String &p_main_pack, bool p_upwards, bool p_ignore_override) {
+#ifdef LIBGODOT_ENABLED
+	if (p_path.is_empty() && p_main_pack.is_empty()) {
+		// An embedded SceneTree starts with an empty res:// namespace. Even a
+		// project or a .godot directory in the caller's CWD must stay invisible.
+		FileAccess::make_default<FileAccessMemory>(FileAccess::ACCESS_RESOURCES);
+		DirAccess::make_default<DirAccessPack>(DirAccess::ACCESS_RESOURCES);
+		using_datapack = true;
+		is_global_class_list_loaded = true; // Empty until a resource pack is mounted.
+		return OK;
+	}
+#endif
 	if (!OS::get_singleton()->get_resource_dir().is_empty()) {
 		// OS will call ProjectSettings->get_resource_path which will be empty if not overridden!
 		// If the OS would rather use a specific location, then it will not be empty.
@@ -722,7 +736,13 @@ Error ProjectSettings::_setup(const String &p_path, const String &p_main_pack, b
 
 	String exec_path = OS::get_singleton()->get_executable_path();
 
-	if (!exec_path.is_empty()) {
+	bool search_executable = !exec_path.is_empty();
+#ifdef LIBGODOT_ENABLED
+	// An explicit project belongs to the embedding application. An unrelated
+	// PCK beside the library or in the process CWD must not take precedence.
+	search_executable = search_executable && p_path == ".";
+#endif
+	if (search_executable) {
 		// We do several tests sequentially until one succeeds to find a PCK,
 		// and if so, we attempt loading it at the end.
 

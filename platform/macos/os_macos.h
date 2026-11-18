@@ -202,6 +202,9 @@ public:
 	virtual void run() override;
 
 	OS_MacOS_NSApp(const char *p_execpath, int p_argc, char **p_argv);
+#ifdef LIBGODOT_ENABLED
+	~OS_MacOS_NSApp() override;
+#endif
 };
 
 class OS_MacOS_Headless : public OS_MacOS {

@@ -140,7 +140,9 @@
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+#ifndef LIBGODOT_ENABLED
 	os_mac->start_main();
+#endif
 }
 
 static const char *godot_ac_ctx = "gd_accessibility_observer_ctx";
@@ -312,8 +314,10 @@ constexpr static NSEventModifierFlags FLAGS = NSEventModifierFlagCommand | NSEve
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+#ifndef LIBGODOT_ENABLED
 	os_mac->cleanup();
 	exit(os_mac->get_exit_code());
+#endif
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
