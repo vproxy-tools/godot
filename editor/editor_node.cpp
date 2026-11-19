@@ -941,7 +941,9 @@ void EditorNode::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_POSTINITIALIZE: {
-			EditorHelp::generate_doc();
+			// A headless import/export can finish before the documentation
+			// worker posts its deferred script scan back to the editor.
+			EditorHelp::generate_doc(true, !cmdline_mode);
 #if defined(MODULE_GDSCRIPT_ENABLED) || defined(MODULE_MONO_ENABLED)
 			EditorHelpHighlighter::create_singleton();
 #endif
