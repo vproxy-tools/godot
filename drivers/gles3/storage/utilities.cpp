@@ -33,6 +33,7 @@
 #ifdef GLES3_ENABLED
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "drivers/gles3/storage/config.h"
 #include "drivers/gles3/storage/light_storage.h"
@@ -52,9 +53,25 @@ Utilities *Utilities::singleton = nullptr;
 Utilities::Utilities() {
 	singleton = this;
 	frame = 0;
+	max_timestamp_query_elements = CLAMP(int(GLOBAL_GET("debug/settings/profiler/max_timestamp_query_elements")), 256, 65535);
+#ifdef GL_API_ENABLED
+	if (RasterizerUtilGLES3::is_gles_over_gl()) {
+		GLint bits = 0;
+		glGetQueryiv(GL_TIMESTAMP, GL_QUERY_COUNTER_BITS, &bits);
+		if (bits > 0) {
+			gpu_timer = GL_TIMESTAMP;
+		} else {
+			glGetQueryiv(GL_TIME_ELAPSED, GL_QUERY_COUNTER_BITS, &bits);
+			if (bits > 0) {
+				gpu_timer = GL_TIME_ELAPSED;
+			}
+		}
+	}
+#endif
 	for (int i = 0; i < FRAME_COUNT; i++) {
 		frames[i].index = 0;
-		glGenQueries(max_timestamp_query_elements, frames[i].queries);
+		frames[i].queries.resize(max_timestamp_query_elements);
+		glGenQueries(max_timestamp_query_elements, frames[i].queries.ptr());
 
 		frames[i].timestamp_names.resize(max_timestamp_query_elements);
 		frames[i].timestamp_cpu_values.resize(max_timestamp_query_elements);
@@ -68,9 +85,14 @@ Utilities::Utilities() {
 }
 
 Utilities::~Utilities() {
+#ifdef GL_API_ENABLED
+	if (elapsed_query_open) {
+		glEndQuery(GL_TIME_ELAPSED);
+	}
+#endif
 	singleton = nullptr;
 	for (int i = 0; i < FRAME_COUNT; i++) {
-		glDeleteQueries(max_timestamp_query_elements, frames[i].queries);
+		glDeleteQueries(max_timestamp_query_elements, frames[i].queries.ptr());
 	}
 
 	if (texture_mem_cache) {
@@ -338,8 +360,15 @@ void Utilities::capture_timestamp(const String &p_name) {
 	ERR_FAIL_COND(frames[frame].timestamp_count >= max_timestamp_query_elements);
 
 #ifdef GL_API_ENABLED
-	if (RasterizerUtilGLES3::is_gles_over_gl()) {
+	if (gpu_timer == GL_TIMESTAMP) {
 		glQueryCounter(frames[frame].queries[frames[frame].timestamp_count], GL_TIMESTAMP);
+	} else if (gpu_timer == GL_TIME_ELAPSED) {
+		// Some desktop GL drivers support interval queries but have no absolute GPU clock.
+		if (elapsed_query_open) {
+			glEndQuery(GL_TIME_ELAPSED);
+		}
+		glBeginQuery(GL_TIME_ELAPSED, frames[frame].queries[frames[frame].timestamp_count]);
+		elapsed_query_open = true;
 	}
 #endif // GL_API_ENABLED
 
@@ -349,30 +378,55 @@ void Utilities::capture_timestamp(const String &p_name) {
 }
 
 void Utilities::_capture_timestamps_begin() {
-	// frame is incremented at the end of the frame so this gives us the queries for frame - 2. By then they should be ready.
-	if (frames[frame].timestamp_count) {
 #ifdef GL_API_ENABLED
-		if (RasterizerUtilGLES3::is_gles_over_gl()) {
-			for (uint32_t i = 0; i < frames[frame].timestamp_count; i++) {
-				uint64_t temp = 0;
-				glGetQueryObjectui64v(frames[frame].queries[i], GL_QUERY_RESULT, &temp);
-				frames[frame].timestamp_result_values[i] = temp;
-			}
-		}
-#endif // GL_API_ENABLED
-		SWAP(frames[frame].timestamp_names, frames[frame].timestamp_result_names);
-		SWAP(frames[frame].timestamp_cpu_values, frames[frame].timestamp_cpu_result_values);
+	// Starting an elapsed query can split a render pass. Leave ordinary frames
+	// alone unless the profiler or a measured viewport requested GPU timing.
+	if (gpu_timer == GL_TIME_ELAPSED && !capturing_timestamps) {
+		return;
 	}
-
-	frames[frame].timestamp_result_count = frames[frame].timestamp_count;
-	frames[frame].timestamp_count = 0;
-	frames[frame].index = Engine::get_singleton()->get_frames_drawn();
+#endif
 	capture_timestamp("Internal Begin");
 }
 
 void Utilities::capture_timestamps_end() {
-	capture_timestamp("Internal End");
+	if (frames[frame].timestamp_count) {
+		capture_timestamp("Internal End");
+	}
+#ifdef GL_API_ENABLED
+	if (elapsed_query_open) {
+		glEndQuery(GL_TIME_ELAPSED);
+		elapsed_query_open = false;
+	}
+#endif
+	frames[frame].index = Engine::get_singleton()->get_frames_drawn();
 	frame = (frame + 1) % FRAME_COUNT;
+
+	// Recycle the next slot before offscreen draws can submit new markers
+	// between engine frames. Its recorded queries are two frames old.
+	Frame &next = frames[frame];
+	if (next.timestamp_count) {
+#ifdef GL_API_ENABLED
+		if (gpu_timer != GL_NONE) {
+			uint64_t elapsed = 0;
+			for (uint32_t i = 0; i < next.timestamp_count; i++) {
+				if (gpu_timer == GL_TIMESTAMP) {
+					glGetQueryObjectui64v(next.queries[i], GL_QUERY_RESULT, &next.timestamp_result_values[i]);
+				} else {
+					next.timestamp_result_values[i] = elapsed;
+					if (i + 1 < next.timestamp_count) {
+						uint64_t interval = 0;
+						glGetQueryObjectui64v(next.queries[i], GL_QUERY_RESULT, &interval);
+						elapsed += interval;
+					}
+				}
+			}
+		}
+#endif
+		SWAP(next.timestamp_names, next.timestamp_result_names);
+		SWAP(next.timestamp_cpu_values, next.timestamp_cpu_result_values);
+	}
+	next.timestamp_result_count = next.timestamp_count;
+	next.timestamp_count = 0;
 }
 
 uint32_t Utilities::get_captured_timestamps_count() const {

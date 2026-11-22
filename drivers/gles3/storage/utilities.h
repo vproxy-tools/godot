@@ -180,11 +180,10 @@ public:
 
 	/* TIMING */
 
-#define MAX_QUERIES 256
 #define FRAME_COUNT 3
 
 	struct Frame {
-		GLuint queries[MAX_QUERIES];
+		TightLocalVector<GLuint> queries;
 		TightLocalVector<String> timestamp_names;
 		TightLocalVector<uint64_t> timestamp_cpu_values;
 		uint32_t timestamp_count = 0;
@@ -195,7 +194,11 @@ public:
 		uint64_t index = 0;
 	};
 
-	const uint32_t max_timestamp_query_elements = MAX_QUERIES;
+	uint32_t max_timestamp_query_elements = 0;
+#ifdef GL_API_ENABLED
+	GLenum gpu_timer = GL_NONE;
+	bool elapsed_query_open = false;
+#endif
 
 	Frame frames[FRAME_COUNT]; // Frames for capturing timestamps. We use 3 so we don't need to wait for commands to complete
 	uint32_t frame = 0;
