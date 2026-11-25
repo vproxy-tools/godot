@@ -62,9 +62,29 @@ class TTS_Linux;
 class DisplayServerWayland : public DisplayServer {
 	GDSOFTCLASS(DisplayServerWayland, DisplayServer);
 
+public:
+	using DragCallback = uint32_t (*)(void *, const WaylandThread::DragEventMessage &, String &);
+	void window_finish_javafx_ime(DisplayServerEnums::WindowID p_id, bool p_commit);
+	void window_expect_javafx_show(DisplayServerEnums::WindowID p_id);
+	void window_set_javafx_visible(DisplayServerEnums::WindowID p_id, bool p_visible);
+	bool window_is_javafx_visible(DisplayServerEnums::WindowID p_id) const;
+	Error drag_source_start(DisplayServerEnums::WindowID p_id, const WaylandThread::DragSourceData &p_data);
+	int drag_source_result(DisplayServerEnums::WindowID p_id, bool p_cancel);
+	bool window_set_drag_target(DisplayServerEnums::WindowID p_id, DragCallback p_callback, void *p_data);
+
+private:
+	bool javafx_startup_enabled = false;
+	LocalVector<DisplayServerEnums::WindowID> javafx_pending_owned_shows;
+	bool _javafx_owner_awaits_first_map(DisplayServerEnums::WindowID p_owner) const;
 	struct WindowData {
+		bool presentation_paused = false;
+		bool javafx_show_requested = false;
+		bool remap_required = false;
+		DragCallback drag_callback = nullptr;
+		void *drag_userdata = nullptr;
 		DisplayServerEnums::WindowID id = DisplayServerEnums::INVALID_WINDOW_ID;
 
+		bool exclusive = false;
 		DisplayServerEnums::WindowID parent_id = DisplayServerEnums::INVALID_WINDOW_ID;
 
 		// For popups.
@@ -187,6 +207,7 @@ class DisplayServerWayland : public DisplayServer {
 	static void dispatch_input_events(const Ref<InputEvent> &p_event);
 	void _dispatch_input_event(const Ref<InputEvent> &p_event);
 
+	void _destroy_window_surface(WindowData &p_window);
 	void _delete_window(DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID);
 	void _update_window_rect(const Rect2i &p_rect, DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID);
 	void _hover_window(DisplayServerEnums::WindowID p_window_id);
@@ -236,6 +257,11 @@ public:
 	virtual Point2i mouse_get_position() const override;
 	virtual BitField<MouseButtonMask> mouse_get_button_state() const override;
 
+	Error clipboard_set_data(const HashMap<String, Vector<uint8_t>> &p_data);
+	String window_get_exported_handle(DisplayServerEnums::WindowID p_id) const;
+	Dictionary window_get_icon_buffer_info(DisplayServerEnums::WindowID p_id) const;
+	Vector<String> clipboard_types() const;
+	Error clipboard_open(const String &p_mime, Vector<uint8_t> &r_owned, int &r_fd) const;
 	virtual void clipboard_set(const String &p_text) override;
 	virtual String clipboard_get() const override;
 	virtual Ref<Image> clipboard_get_image() const override;
@@ -294,6 +320,7 @@ public:
 	virtual Size2i window_get_max_size(DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 	virtual void gl_window_make_current(DisplayServerEnums::WindowID p_window_id) override;
 
+	virtual void window_set_exclusive(DisplayServerEnums::WindowID p_window_id, bool p_exclusive) override;
 	virtual void window_set_transient(DisplayServerEnums::WindowID p_window_id, DisplayServerEnums::WindowID p_parent) override;
 
 	virtual void window_set_min_size(const Size2i p_size, DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID) override;
@@ -319,6 +346,7 @@ public:
 
 	virtual void window_move_to_foreground(DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	virtual bool window_is_focused(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
+	virtual DisplayServerEnums::WindowID get_focused_window() const override;
 
 	virtual bool window_can_draw(DisplayServerEnums::WindowID p_window_id = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 
@@ -357,6 +385,7 @@ public:
 
 	virtual void cursor_set_shape(DisplayServerEnums::CursorShape p_shape) override;
 	virtual DisplayServerEnums::CursorShape cursor_get_shape() const override;
+	Dictionary cursor_get_custom_buffer_info() const;
 	virtual void cursor_set_custom_image(const Ref<Resource> &p_cursor, DisplayServerEnums::CursorShape p_shape, const Vector2 &p_hotspot) override;
 
 	virtual bool get_swap_cancel_ok() override;

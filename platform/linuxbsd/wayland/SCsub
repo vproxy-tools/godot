@@ -65,6 +65,7 @@ generated_sources = [
     generate_from_xml(
         "fractional_scale", "#thirdparty/wayland-protocols/staging/fractional-scale/fractional-scale-v1.xml"
     ),
+    generate_from_xml("xdg_dialog", "#thirdparty/wayland-protocols/staging/xdg-dialog/xdg-dialog-v1.xml"),
     generate_from_xml("xdg_activation", "#thirdparty/wayland-protocols/staging/xdg-activation/xdg-activation-v1.xml"),
     generate_from_xml(
         "xdg_system_bell", "#thirdparty/wayland-protocols/staging/xdg-system-bell/xdg-system-bell-v1.xml"
@@ -91,6 +92,7 @@ generated_sources = [
     generate_from_xml(
         "relative_pointer", "#thirdparty/wayland-protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml"
     ),
+    generate_from_xml("text_input_v1", "#thirdparty/wayland-protocols/unstable/text-input/text-input-unstable-v1.xml"),
     generate_from_xml("text_input", "#thirdparty/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml"),
     generate_from_xml(
         "xdg_decoration", "#thirdparty/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"

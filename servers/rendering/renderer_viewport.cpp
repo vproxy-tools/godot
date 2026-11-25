@@ -1433,10 +1433,36 @@ void RendererViewport::viewport_set_positional_shadow_atlas_quadrant_subdivision
 	RSG::light_storage->shadow_atlas_set_quadrant_subdivision(viewport->shadow_atlas, p_quadrant, p_subdiv);
 }
 
+// Select before building the render buffers. A resolve attachment requires a
+// multisampled source, and shaders that read individual samples need the same
+// count as the textures, render passes and pipelines.
+static RSE::ViewportMSAA select_viewport_msaa(RSE::ViewportMSAA p_requested) {
+	if (p_requested == RSE::VIEWPORT_MSAA_DISABLED || !RD::get_singleton()) {
+		return p_requested;
+	}
+	const uint64_t counts = RD::get_singleton()->get_device_driver()->api_trait_get(RDD::API_TRAIT_FRAMEBUFFER_SAMPLE_COUNTS);
+	if (counts == 0 || (counts & (1u << p_requested))) {
+		return p_requested;
+	}
+	RSE::ViewportMSAA selected = RSE::VIEWPORT_MSAA_DISABLED;
+	for (int i = 1; i < RSE::VIEWPORT_MSAA_MAX; i++) {
+		if (counts & (1u << i)) {
+			if (i > p_requested && selected != RSE::VIEWPORT_MSAA_DISABLED) {
+				break;
+			}
+			selected = RSE::ViewportMSAA(i);
+		}
+	}
+	WARN_PRINT_ONCE(vformat("Viewport requested %d samples per pixel. The graphics device supports sample count mask 0x%x. Using %d samples per pixel.", 1u << p_requested, counts, 1u << selected));
+	return selected;
+}
+
 void RendererViewport::viewport_set_msaa_2d(RID p_viewport, RSE::ViewportMSAA p_msaa) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
 
+	ERR_FAIL_INDEX(p_msaa, RSE::VIEWPORT_MSAA_MAX);
+	p_msaa = select_viewport_msaa(p_msaa);
 	if (viewport->msaa_2d == p_msaa) {
 		return;
 	}
@@ -1448,6 +1474,8 @@ void RendererViewport::viewport_set_msaa_3d(RID p_viewport, RSE::ViewportMSAA p_
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
 
+	ERR_FAIL_INDEX(p_msaa, RSE::VIEWPORT_MSAA_MAX);
+	p_msaa = select_viewport_msaa(p_msaa);
 	if (viewport->msaa_3d == p_msaa) {
 		return;
 	}

@@ -115,6 +115,8 @@ for x in sorted(glob.glob("platform/*")):
 env = Environment(tools=[])
 env.PrependENVPath("PATH", os.getenv("PATH"))
 env.PrependENVPath("PKG_CONFIG_PATH", os.getenv("PKG_CONFIG_PATH"))
+if "PKG_CONFIG_SYSROOT_DIR" in os.environ:
+    env["ENV"]["PKG_CONFIG_SYSROOT_DIR"] = os.environ["PKG_CONFIG_SYSROOT_DIR"]
 if "TERM" in os.environ:  # Used for colored output.
     env["ENV"]["TERM"] = os.environ["TERM"]
 

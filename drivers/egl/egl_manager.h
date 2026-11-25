@@ -69,7 +69,7 @@ private:
 	LocalVector<GLDisplay> displays;
 	LocalVector<GLWindow> windows;
 
-	GLWindow *current_window = nullptr;
+	DisplayServerEnums::WindowID current_window_id = DisplayServerEnums::INVALID_WINDOW_ID;
 
 	// On EGL the default swap interval is 1 and thus vsync is on by default.
 	bool use_vsync = true;
@@ -99,6 +99,7 @@ public:
 	void window_destroy(DisplayServerEnums::WindowID p_window_id);
 
 	void release_current();
+	DisplayServerEnums::WindowID get_current_window_id() const { return current_window_id; }
 	void swap_buffers();
 
 	void window_make_current(DisplayServerEnums::WindowID p_window_id);

@@ -331,6 +331,9 @@ void EGLManager::window_destroy(DisplayServerEnums::WindowID p_window_id) {
 		return;
 	}
 
+	if (current_window_id == p_window_id) {
+		release_current();
+	}
 	glwindow.initialized = false;
 
 	ERR_FAIL_INDEX(glwindow.gldisplay_id, (int)displays.size());
@@ -343,29 +346,29 @@ void EGLManager::window_destroy(DisplayServerEnums::WindowID p_window_id) {
 }
 
 void EGLManager::release_current() {
-	if (!current_window) {
+	if (current_window_id == DisplayServerEnums::INVALID_WINDOW_ID) {
 		return;
 	}
 
-	GLDisplay &current_display = displays[current_window->gldisplay_id];
+	GLDisplay &current_display = displays[windows[current_window_id].gldisplay_id];
 
 	eglMakeCurrent(current_display.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-	current_window = nullptr;
+	current_window_id = DisplayServerEnums::INVALID_WINDOW_ID;
 }
 
 void EGLManager::swap_buffers() {
-	if (!current_window) {
+	if (current_window_id == DisplayServerEnums::INVALID_WINDOW_ID) {
 		return;
 	}
 
-	if (!current_window->initialized) {
+	if (!windows[current_window_id].initialized) {
 		WARN_PRINT("Current OpenGL window is uninitialized!");
 		return;
 	}
 
-	GLDisplay &current_display = displays[current_window->gldisplay_id];
+	GLDisplay &current_display = displays[windows[current_window_id].gldisplay_id];
 
-	eglSwapBuffers(current_display.egl_display, current_window->egl_surface);
+	eglSwapBuffers(current_display.egl_display, windows[current_window_id].egl_surface);
 }
 
 void EGLManager::window_make_current(DisplayServerEnums::WindowID p_window_id) {
@@ -375,15 +378,15 @@ void EGLManager::window_make_current(DisplayServerEnums::WindowID p_window_id) {
 
 	GLWindow &glwindow = windows[p_window_id];
 
-	if (&glwindow == current_window || !glwindow.initialized) {
+	if (p_window_id == current_window_id || !glwindow.initialized) {
 		return;
 	}
 
-	current_window = &glwindow;
+	current_window_id = p_window_id;
 
-	GLDisplay &current_display = displays[current_window->gldisplay_id];
+	GLDisplay &current_display = displays[windows[current_window_id].gldisplay_id];
 
-	eglMakeCurrent(current_display.egl_display, current_window->egl_surface, current_window->egl_surface, current_display.egl_context);
+	eglMakeCurrent(current_display.egl_display, windows[current_window_id].egl_surface, windows[current_window_id].egl_surface, current_display.egl_context);
 
 #ifdef WINDOWS_ENABLED
 	RasterizerGLES3::set_screen_flipped_y(glwindow.flipped_y);
@@ -392,11 +395,11 @@ void EGLManager::window_make_current(DisplayServerEnums::WindowID p_window_id) {
 
 void EGLManager::set_use_vsync(bool p_use) {
 	// We need an active window to get a display to set the vsync.
-	if (!current_window) {
+	if (current_window_id == DisplayServerEnums::INVALID_WINDOW_ID) {
 		return;
 	}
 
-	GLDisplay &disp = displays[current_window->gldisplay_id];
+	GLDisplay &disp = displays[windows[current_window_id].gldisplay_id];
 
 	int swap_interval = p_use ? 1 : 0;
 

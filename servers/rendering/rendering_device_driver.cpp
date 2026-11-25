@@ -37,6 +37,8 @@
 uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 	// Sensible canonical defaults.
 	switch (p_trait) {
+		case API_TRAIT_FRAMEBUFFER_SAMPLE_COUNTS:
+			return 0;
 		case API_TRAIT_HONORS_PIPELINE_BARRIERS:
 			return 1;
 		case API_TRAIT_SHADER_CHANGE_INVALIDATION:

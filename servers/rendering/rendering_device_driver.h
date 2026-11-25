@@ -920,6 +920,8 @@ public:
 		API_TRAIT_SHADER_GROUP_HANDLE_SIZE,
 		API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT,
 		API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT,
+		// Bit N represents 2^N framebuffer samples. Zero leaves viewport selection to the backend.
+		API_TRAIT_FRAMEBUFFER_SAMPLE_COUNTS,
 	};
 
 	enum ShaderChangeInvalidation {

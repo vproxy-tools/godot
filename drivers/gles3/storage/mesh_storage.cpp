@@ -48,6 +48,9 @@ MeshStorage *MeshStorage::get_singleton() {
 
 MeshStorage::MeshStorage() {
 	singleton = this;
+#ifdef LINUXBSD_ENABLED
+	prefer_dynamic_2d_indices = Utilities::get_singleton()->get_video_adapter_name().begins_with("D3D12 (");
+#endif
 
 	{
 		skeleton_shader.shader.initialize();
@@ -266,7 +269,10 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		bool is_index_16 = new_surface.vertex_count <= 65536 && new_surface.vertex_count > 0;
 		glGenBuffers(1, &s->index_buffer);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s->index_buffer);
-		GLES3::Utilities::get_singleton()->buffer_allocate_data(GL_ELEMENT_ARRAY_BUFFER, s->index_buffer, new_surface.index_data.size(), new_surface.index_data.ptr(), GL_STATIC_DRAW, "Mesh index buffer");
+		// On Mesa D3D12, static index uploads can stall even for small 2D
+		// surfaces whose vertex and attribute buffers already use dynamic storage.
+		const bool dynamic_indices = prefer_dynamic_2d_indices && (s->format & RSE::ARRAY_FLAG_USE_2D_VERTICES) && (s->format & RSE::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
+		GLES3::Utilities::get_singleton()->buffer_allocate_data(GL_ELEMENT_ARRAY_BUFFER, s->index_buffer, new_surface.index_data.size(), new_surface.index_data.ptr(), dynamic_indices ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW, "Mesh index buffer");
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0); //unbind
 		s->index_count = new_surface.index_count;
 		s->index_buffer_size = new_surface.index_data.size();

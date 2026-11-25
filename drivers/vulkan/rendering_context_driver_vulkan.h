@@ -160,6 +160,7 @@ public:
 	// Vulkan-only methods.
 	struct Surface {
 		VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+		SafeFlag presentation_paused;
 		uint32_t width = 0;
 		uint32_t height = 0;
 		DisplayServerEnums::VSyncMode vsync_mode = DisplayServerEnums::VSYNC_ENABLED;

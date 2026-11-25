@@ -243,6 +243,7 @@ struct Skeleton {
 class MeshStorage : public RendererMeshStorage {
 private:
 	static MeshStorage *singleton;
+	bool prefer_dynamic_2d_indices = false;
 
 	struct {
 		SkeletonShaderGLES3 shader;

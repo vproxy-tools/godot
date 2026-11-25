@@ -167,6 +167,42 @@ void DisplayServerWayland::_dispatch_input_event(const Ref<InputEvent> &p_event)
 	}
 }
 
+void DisplayServerWayland::_destroy_window_surface(WindowData &p_window) {
+	if (p_window.visible) {
+#ifdef VULKAN_ENABLED
+		if (rendering_device) {
+			rendering_device->screen_free(p_window.id);
+		}
+
+		if (rendering_context) {
+			rendering_context->window_destroy(p_window.id);
+		}
+#endif
+
+#ifdef GLES3_ENABLED
+		if (egl_manager) {
+			if (egl_manager->get_current_window_id() == p_window.id) {
+				for (const KeyValue<DisplayServerEnums::WindowID, WindowData> &entry : windows) {
+					if (entry.key != p_window.id && entry.value.visible && entry.value.wl_egl_window) {
+						egl_manager->window_make_current(entry.key);
+						break;
+					}
+				}
+			}
+			egl_manager->window_destroy(p_window.id);
+			wl_egl_window_destroy(p_window.wl_egl_window);
+			p_window.wl_egl_window = nullptr;
+		}
+#endif
+	}
+
+	if (p_window.created) {
+		wayland_thread.window_destroy(p_window.id);
+	}
+	p_window.visible = false;
+	p_window.created = false;
+}
+
 void DisplayServerWayland::_delete_window(DisplayServerEnums::WindowID p_window_id) {
 	ERR_FAIL_COND(!windows.has(p_window_id));
 	WindowData &wd = windows[p_window_id];
@@ -196,28 +232,9 @@ void DisplayServerWayland::_delete_window(DisplayServerEnums::WindowID p_window_
 
 	AccessibilityServer::get_singleton()->window_destroy(p_window_id);
 
-	if (wd.visible) {
-#ifdef VULKAN_ENABLED
-		if (rendering_device) {
-			rendering_device->screen_free(p_window_id);
-		}
+	_destroy_window_surface(wd);
 
-		if (rendering_context) {
-			rendering_context->window_destroy(p_window_id);
-		}
-#endif
-
-#ifdef GLES3_ENABLED
-		if (egl_manager) {
-			egl_manager->window_destroy(p_window_id);
-		}
-#endif
-	}
-
-	if (wd.created) {
-		wayland_thread.window_destroy(p_window_id);
-	}
-
+	javafx_pending_owned_shows.erase(p_window_id);
 	windows.erase(p_window_id);
 
 	DEBUG_LOG_WAYLAND(vformat("Destroyed window %d", p_window_id));
@@ -571,6 +588,39 @@ BitField<MouseButtonMask> DisplayServerWayland::mouse_get_button_state() const {
 	return wayland_thread.pointer_get_button_mask();
 }
 
+Dictionary DisplayServerWayland::window_get_icon_buffer_info(DisplayServerEnums::WindowID p_id) const {
+	MutexLock lock(wayland_thread.mutex);
+	const WaylandThread::WindowState *window = wayland_thread.window_get_state(p_id);
+	if (!window) {
+		return Dictionary();
+	}
+	Dictionary info = window->icon_buffer_info.duplicate();
+	info["supported"] = window->registry->xdg_toplevel_icon_manager != nullptr;
+	info["installed"] = window->xdg_icon != nullptr;
+	return info;
+}
+
+String DisplayServerWayland::window_get_exported_handle(DisplayServerEnums::WindowID p_id) const {
+	MutexLock lock(wayland_thread.mutex);
+	const WaylandThread::WindowState *window = wayland_thread.window_get_state(p_id);
+	return window ? window->exported_handle : String();
+}
+
+Error DisplayServerWayland::clipboard_set_data(const HashMap<String, Vector<uint8_t>> &p_data) {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.selection_set_data(p_data);
+}
+
+Vector<String> DisplayServerWayland::clipboard_types() const {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.selection_types();
+}
+
+Error DisplayServerWayland::clipboard_open(const String &p_mime, Vector<uint8_t> &r_owned, int &r_fd) const {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.selection_open(p_mime, r_owned, r_fd);
+}
+
 // NOTE: According to the Wayland specification, this method will only do
 // anything if the user has interacted with the application by sending a
 // "recent enough" input event.
@@ -851,6 +901,7 @@ DisplayServerEnums::WindowID DisplayServerWayland::create_sub_window(DisplayServ
 	wd.rect = p_rect;
 
 	wd.title = "Godot";
+	wd.exclusive = p_exclusive;
 	wd.parent_id = p_transient_parent;
 	return id;
 }
@@ -885,7 +936,11 @@ void DisplayServerWayland::show_window(DisplayServerEnums::WindowID p_window_id)
 			wd.rect.position = Point2i();
 
 			DEBUG_LOG_WAYLAND(vformat("Creating regular window of size %s", wd.rect.size));
-			wayland_thread.window_create(p_window_id, wd.rect.size, wd.parent_id);
+			// Glass supplies physical pixels for every Stage, including those
+			// opened by a JavaFXHost inside an existing Godot scene.
+			const Object *owner = wd.instance_id.is_valid() ? ObjectDB::get_instance(wd.instance_id) : nullptr;
+			bool size_in_pixels = javafx_startup_enabled || (owner && owner->is_class(SNAME("JavaFXNativeWindow")));
+			wayland_thread.window_create(p_window_id, wd.rect.size, wd.parent_id, size_in_pixels);
 			wayland_thread.window_set_min_size(p_window_id, wd.min_size);
 			wayland_thread.window_set_max_size(p_window_id, wd.max_size);
 			wayland_thread.window_set_app_id(p_window_id, _get_app_id_from_context(context));
@@ -917,6 +972,10 @@ void DisplayServerWayland::show_window(DisplayServerEnums::WindowID p_window_id)
 			_send_window_event(DisplayServerEnums::WINDOW_EVENT_FORCE_CLOSE, p_window_id);
 
 			return;
+		}
+
+		if (wd.exclusive) {
+			wayland_thread.window_set_modal(p_window_id, true);
 		}
 
 		// NOTE: The XDG shell protocol is built in a way that causes the window to
@@ -969,6 +1028,14 @@ void DisplayServerWayland::show_window(DisplayServerEnums::WindowID p_window_id)
 		// set. Make sure the method you're calling does not depend on it before this
 		// assignment.
 		wd.visible = true;
+		wd.presentation_paused = javafx_startup_enabled;
+#ifdef VULKAN_ENABLED
+		if (rendering_context && wd.presentation_paused) {
+			auto *surface = reinterpret_cast<RenderingContextDriverVulkan::Surface *>(rendering_context->surface_get_from_window(wd.id));
+			surface->presentation_paused.set();
+		}
+#endif
+
 
 		// Actually try to apply the window's mode now that it's visible.
 		window_set_mode(setup_mode, wd.id);
@@ -1136,6 +1203,106 @@ void DisplayServerWayland::window_set_input_text_callback(const Callable &p_call
 	windows[p_window_id].input_text_callback = p_callable;
 }
 
+bool DisplayServerWayland::window_is_javafx_visible(DisplayServerEnums::WindowID p_id) const {
+	MutexLock lock(wayland_thread.mutex);
+	const WindowData *wd = windows.getptr(p_id);
+	return wd && wd->visible && !wd->presentation_paused;
+}
+
+void DisplayServerWayland::window_expect_javafx_show(DisplayServerEnums::WindowID p_id) {
+	MutexLock lock(wayland_thread.mutex);
+	WindowData *wd = windows.getptr(p_id);
+	ERR_FAIL_NULL(wd);
+	wd->javafx_show_requested = true;
+}
+
+bool DisplayServerWayland::_javafx_owner_awaits_first_map(DisplayServerEnums::WindowID p_owner) const {
+	const WindowData *owner = windows.getptr(p_owner);
+	if (!owner || !owner->created || !owner->javafx_show_requested || owner->mode == DisplayServerEnums::WINDOW_MODE_MINIMIZED) {
+		return false;
+	}
+	const WaylandThread::WindowState *ws = wayland_thread.window_get_state(p_owner);
+	return ws && !ws->suspended && ws->wl_outputs.is_empty() && ws->last_frame_time == 0;
+}
+
+void DisplayServerWayland::window_set_javafx_visible(DisplayServerEnums::WindowID p_id, bool p_visible) {
+	MutexLock lock(wayland_thread.mutex);
+	WindowData *wd = windows.getptr(p_id);
+	ERR_FAIL_NULL(wd);
+	wd->javafx_show_requested = p_visible;
+	if (!p_visible) {
+		javafx_pending_owned_shows.erase(p_id);
+	}
+	if (wd->presentation_paused == !p_visible) {
+		return;
+	}
+	WaylandThread::WindowState *ws = wayland_thread.window_get_state(p_id);
+	ERR_FAIL_NULL(ws);
+	if (p_visible && wd->remap_required) {
+		// WSLg may leave an unmapped xdg_toplevel without another configure.
+		// Recreate the native peer, keeping the logical ID, callbacks, title,
+		// render targets and transient relationships owned by WindowData.
+		_destroy_window_surface(*wd);
+		show_window(p_id);
+		ERR_FAIL_COND_MSG(!wd->visible, "Could not recreate the Wayland window.");
+		ws = wayland_thread.window_get_state(p_id);
+		ERR_FAIL_NULL(ws);
+		ws->native_drag_target = wd->drag_callback != nullptr;
+		for (const KeyValue<DisplayServerEnums::WindowID, WindowData> &entry : windows) {
+			if (entry.value.created && entry.value.parent_id == p_id) {
+				wayland_thread.window_set_parent(entry.key, p_id);
+			}
+		}
+		wd->remap_required = false;
+	}
+	// Mapping a child before its owner lets a compositor stack the owner above it.
+	// Keep accepting frames while the owner waits for its startup image.
+	if (p_visible && !ws->xdg_popup && _javafx_owner_awaits_first_map(wd->parent_id)) {
+		if (!javafx_pending_owned_shows.has(p_id)) {
+			javafx_pending_owned_shows.push_back(p_id);
+		}
+		return;
+	}
+	wd->presentation_paused = !p_visible;
+#ifdef VULKAN_ENABLED
+	if (rendering_context) {
+		auto *surface = reinterpret_cast<RenderingContextDriverVulkan::Surface *>(rendering_context->surface_get_from_window(p_id));
+		surface->presentation_paused.set_to(!p_visible);
+	}
+#endif
+	if (!p_visible) {
+		wayland_thread.drag_source_result(p_id, true);
+		wl_surface_attach(ws->wl_surface, nullptr, 0, 0);
+		wl_surface_commit(ws->wl_surface);
+		wl_display_roundtrip(wayland_thread.get_wl_display());
+		wd->remap_required = true;
+	}
+	suspend_state = SuspendState::NONE;
+}
+
+Error DisplayServerWayland::drag_source_start(DisplayServerEnums::WindowID p_id, const WaylandThread::DragSourceData &p_data) {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.drag_source_start(p_id, p_data);
+}
+
+int DisplayServerWayland::drag_source_result(DisplayServerEnums::WindowID p_id, bool p_cancel) {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.drag_source_result(p_id, p_cancel);
+}
+
+bool DisplayServerWayland::window_set_drag_target(DisplayServerEnums::WindowID p_id, DragCallback p_callback, void *p_data) {
+	MutexLock lock(wayland_thread.mutex);
+	WindowData *wd = windows.getptr(p_id);
+	WaylandThread::WindowState *ws = wayland_thread.window_get_state(p_id);
+	if (!wd || !ws) {
+		return false;
+	}
+	wd->drag_callback = p_callback;
+	wd->drag_userdata = p_data;
+	ws->native_drag_target = p_callback != nullptr;
+	return true;
+}
+
 void DisplayServerWayland::window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window_id) {
 	MutexLock mutex_lock(wayland_thread.mutex);
 
@@ -1208,6 +1375,16 @@ void DisplayServerWayland::gl_window_make_current(DisplayServerEnums::WindowID p
 		egl_manager->window_make_current(p_window_id);
 	}
 #endif
+}
+
+void DisplayServerWayland::window_set_exclusive(DisplayServerEnums::WindowID p_window_id, bool p_exclusive) {
+	MutexLock mutex_lock(wayland_thread.mutex);
+	ERR_FAIL_COND(!windows.has(p_window_id));
+	WindowData &wd = windows[p_window_id];
+	wd.exclusive = p_exclusive;
+	if (wd.created) {
+		wayland_thread.window_set_modal(p_window_id, p_exclusive);
+	}
 }
 
 void DisplayServerWayland::window_set_transient(DisplayServerEnums::WindowID p_window_id, DisplayServerEnums::WindowID p_parent) {
@@ -1402,13 +1579,19 @@ void DisplayServerWayland::window_request_attention(DisplayServerEnums::WindowID
 }
 
 void DisplayServerWayland::window_move_to_foreground(DisplayServerEnums::WindowID p_window_id) {
+	MutexLock mutex_lock(wayland_thread.mutex);
 	wayland_thread.window_request_attention(p_window_id, true);
+}
+
+DisplayServerEnums::WindowID DisplayServerWayland::get_focused_window() const {
+	MutexLock lock(wayland_thread.mutex);
+	return wayland_thread.get_focused_window();
 }
 
 bool DisplayServerWayland::window_is_focused(DisplayServerEnums::WindowID p_window_id) const {
 	MutexLock mutex_lock(wayland_thread.mutex);
 
-	return wayland_thread.pointer_get_pointed_window_id() == p_window_id;
+	return wayland_thread.window_is_focused(p_window_id);
 }
 
 bool DisplayServerWayland::window_can_draw(DisplayServerEnums::WindowID p_window_id) const {
@@ -1430,6 +1613,11 @@ bool DisplayServerWayland::window_can_draw(DisplayServerEnums::WindowID p_window
 
 bool DisplayServerWayland::can_any_window_draw() const {
 	return suspend_state == SuspendState::NONE;
+}
+
+void DisplayServerWayland::window_finish_javafx_ime(DisplayServerEnums::WindowID p_id, bool p_commit) {
+	MutexLock lock(wayland_thread.mutex);
+	wayland_thread.window_finish_ime(p_id, p_commit);
 }
 
 void DisplayServerWayland::window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window_id) {
@@ -1723,33 +1911,32 @@ DisplayServerEnums::CursorShape DisplayServerWayland::cursor_get_shape() const {
 	return cursor_shape;
 }
 
+Dictionary DisplayServerWayland::cursor_get_custom_buffer_info() const {
+	MutexLock mutex_lock(wayland_thread.mutex);
+	return wayland_thread.cursor_get_custom_buffer_info();
+}
+
 void DisplayServerWayland::cursor_set_custom_image(const Ref<Resource> &p_cursor, DisplayServerEnums::CursorShape p_shape, const Vector2 &p_hotspot) {
 	MutexLock mutex_lock(wayland_thread.mutex);
 
 	if (p_cursor.is_valid()) {
 		HashMap<DisplayServerEnums::CursorShape, CustomCursor>::Iterator cursor_c = custom_cursors.find(p_shape);
 
-		if (cursor_c) {
-			if (cursor_c->value.resource == p_cursor && cursor_c->value.hotspot == p_hotspot) {
-				// We have a cached cursor. Nice.
-				wayland_thread.cursor_set_shape(p_shape);
-				return;
-			}
-
-			// We're changing this cursor; we'll have to rebuild it.
-			custom_cursors.erase(p_shape);
-			wayland_thread.cursor_shape_clear_custom_image(p_shape);
+		if (cursor_c && cursor_c->value.resource == p_cursor && cursor_c->value.hotspot == p_hotspot) {
+			wayland_thread.cursor_set_shape(p_shape);
+			return;
 		}
 
 		Ref<Image> image = _get_cursor_image_from_resource(p_cursor, p_hotspot);
 		ERR_FAIL_COND(image.is_null());
 
+		Error error = wayland_thread.cursor_shape_set_custom_image(p_shape, image, p_hotspot);
+		ERR_FAIL_COND_MSG(error != OK, "Cannot allocate the Wayland cursor buffer.");
+
 		CustomCursor &cursor = custom_cursors[p_shape];
 
 		cursor.resource = p_cursor;
 		cursor.hotspot = p_hotspot;
-
-		wayland_thread.cursor_shape_set_custom_image(p_shape, image, p_hotspot);
 
 		wayland_thread.cursor_set_shape(p_shape);
 	} else {
@@ -1952,6 +2139,14 @@ void DisplayServerWayland::process_events() {
 
 	// Some behavior depends on the progress of the main thread.
 	wayland_thread.main_loop_callback();
+	for (uint32_t i = javafx_pending_owned_shows.size(); i > 0; --i) {
+		DisplayServerEnums::WindowID child = javafx_pending_owned_shows[i - 1];
+		DisplayServerEnums::WindowID owner = windows[child].parent_id;
+		if (!_javafx_owner_awaits_first_map(owner)) {
+			javafx_pending_owned_shows.remove_at(i - 1);
+			window_set_javafx_visible(child, true);
+		}
+	}
 
 	while (wayland_thread.has_message()) {
 		Ref<WaylandThread::Message> msg = wayland_thread.pop_message();
@@ -2082,6 +2277,41 @@ void DisplayServerWayland::process_events() {
 			continue;
 		}
 
+		Ref<WaylandThread::DragEventMessage> drag = msg;
+		if (drag.is_valid()) {
+			WaylandThread::DragOffer &offer = *drag->offer.ptr();
+			const WindowData &wd = windows[drag->id];
+			uint32_t action = 0;
+			String mime;
+			if (wd.drag_callback && (offer.handle || drag->phase == WaylandThread::DragEventMessage::LEAVE)) {
+				if (offer.handle && (drag->phase == WaylandThread::DragEventMessage::ENTER || drag->phase == WaylandThread::DragEventMessage::MOTION)) {
+					drag->actions = WaylandThread::wl_data_offer_get_offer_state(offer.handle)->source_actions;
+				}
+				DragCallback callback = wd.drag_callback;
+				void *userdata = wd.drag_userdata;
+				wayland_thread.mutex.unlock();
+				action = callback(userdata, *drag.ptr(), mime) & drag->actions;
+				wayland_thread.mutex.lock();
+			}
+			if (!offer.handle) {
+				continue;
+			}
+			if (drag->phase == WaylandThread::DragEventMessage::DROP) {
+				if (action && !offer.accepted_mime.is_empty() && wl_data_offer_get_version(offer.handle) >= 3) {
+					wl_data_offer_finish(offer.handle);
+				}
+				offer.close();
+			} else if (!offer.dropped) {
+				offer.accepted_mime = action ? mime : String();
+				wl_data_offer_accept(offer.handle, offer.serial, action ? mime.utf8().get_data() : nullptr);
+				if (wl_data_offer_get_version(offer.handle) >= 3) {
+					wl_data_offer_set_actions(offer.handle, action, action);
+				}
+				wl_display_flush(wayland_thread.get_wl_display());
+			}
+			continue;
+		}
+
 		Ref<WaylandThread::DropFilesEventMessage> dropfiles_msg = msg;
 		if (dropfiles_msg.is_valid()) {
 			WindowData wd = windows[dropfiles_msg->id];
@@ -2149,7 +2379,7 @@ void DisplayServerWayland::process_events() {
 		case SuspendState::NONE: {
 			bool emulate_vsync = false;
 			for (KeyValue<DisplayServerEnums::WindowID, WindowData> &pair : windows) {
-				if (pair.value.emulate_vsync) {
+				if (!pair.value.presentation_paused && pair.value.emulate_vsync) {
 					emulate_vsync = true;
 					break;
 				}
@@ -2237,7 +2467,7 @@ void DisplayServerWayland::release_rendering_thread() {
 
 void DisplayServerWayland::swap_buffers() {
 #ifdef GLES3_ENABLED
-	if (egl_manager) {
+	if (egl_manager && window_is_javafx_visible(egl_manager->get_current_window_id())) {
 		egl_manager->swap_buffers();
 	}
 #endif
@@ -2501,6 +2731,17 @@ DisplayServerWayland::DisplayServerWayland(const String &p_rendering_driver, Dis
 		r_error = ERR_UNAVAILABLE;
 		ERR_FAIL_MSG("Video driver not found.");
 	}
+
+#ifdef LIBGODOT_ENABLED
+	if (p_context == DisplayServerEnums::CONTEXT_ENGINE) {
+		for (const String &arg : OS::get_singleton()->get_cmdline_user_args()) {
+			if (arg == "--javafx-startup=logo" || arg == "--javafx-startup=hidden") {
+				javafx_startup_enabled = true;
+				break;
+			}
+		}
+	}
+#endif
 
 	cursor_set_shape(DisplayServerEnums::CURSOR_BUSY);
 

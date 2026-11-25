@@ -68,10 +68,12 @@
 #include "wayland/protocol/fractional_scale.gen.h"
 #include "wayland/protocol/tablet.gen.h"
 #include "wayland/protocol/text_input.gen.h"
+#include "wayland/protocol/text_input_v1.gen.h"
 #include "wayland/protocol/viewporter.gen.h"
 #include "wayland/protocol/wayland.gen.h"
 #include "wayland/protocol/xdg_activation.gen.h"
 #include "wayland/protocol/xdg_decoration.gen.h"
+#include "wayland/protocol/xdg_dialog.gen.h"
 #include "wayland/protocol/xdg_foreign_v2.gen.h"
 #include "wayland/protocol/xdg_shell.gen.h"
 #include "wayland/protocol/xdg_system_bell.gen.h"
@@ -164,6 +166,35 @@ public:
 		Ref<InputEvent> event;
 	};
 
+	// A native target negotiates on the engine thread. The compositor may
+	// withdraw the offer while the application processes an enter or motion.
+	class DragOffer : public RefCounted {
+	public:
+		WaylandThread *thread = nullptr;
+		struct wl_data_offer *handle = nullptr;
+		uint32_t serial = 0;
+		bool dropped = false;
+		String accepted_mime;
+
+		int open_mime(const String &p_type);
+		void close();
+		~DragOffer();
+	};
+
+	class DragEventMessage : public WindowMessage {
+		GDSOFTCLASS(DragEventMessage, WindowMessage);
+
+	public:
+		enum Phase { ENTER = 1, MOTION, LEAVE, DROP };
+		Phase phase = ENTER;
+		Ref<DragOffer> offer;
+		Point2i point;
+		bool shift = false;
+		bool control = false;
+		uint32_t actions = 0;
+		PackedStringArray mime_types;
+	};
+
 	class DropFilesEventMessage : public WindowMessage {
 		GDSOFTCLASS(DropFilesEventMessage, WindowMessage);
 
@@ -250,6 +281,9 @@ public:
 		struct xdg_toplevel_icon_manager_v1 *xdg_toplevel_icon_manager = nullptr;
 		uint32_t xdg_toplevel_icon_manager_name = 0;
 
+		struct xdg_wm_dialog_v1 *dialog_manager = nullptr;
+		uint32_t dialog_manager_name = 0;
+
 		struct xdg_activation_v1 *xdg_activation = nullptr;
 		uint32_t xdg_activation_name = 0;
 
@@ -271,6 +305,9 @@ public:
 		struct zwp_tablet_manager_v2 *wp_tablet_manager = nullptr;
 		uint32_t wp_tablet_manager_name = 0;
 
+		struct zwp_text_input_manager_v1 *text_manager_v1 = nullptr;
+		uint32_t text_manager_v1_name = 0;
+
 		struct zwp_text_input_manager_v3 *wp_text_input_manager = nullptr;
 		uint32_t wp_text_input_manager_name = 0;
 
@@ -289,8 +326,14 @@ public:
 	// TODO: Make private?
 
 	struct WindowState {
+		bool native_drag_target = false;
+		int drag_source_result = 0; // -1 until cancellation or compositor confirmation.
+		Size2i floating_size;
+		bool ime_requested = false;
+		Point2i ime_position;
 		DisplayServerEnums::WindowID id = DisplayServerEnums::INVALID_WINDOW_ID;
 		DisplayServerEnums::WindowID parent_id = DisplayServerEnums::INVALID_WINDOW_ID;
+		bool transient_children_waiting_for_map = false;
 
 		Rect2i rect;
 		DisplayServerEnums::WindowMode mode = DisplayServerEnums::WINDOW_MODE_WINDOWED;
@@ -301,7 +344,14 @@ public:
 		bool maximized = false; // MUST obey configure size.
 		bool fullscreen = false; // Can be smaller than configure size.
 		bool resizing = false; // Configure size is a max.
-		// No need for `activated` (yet)
+		bool activated = false;
+		bool minimize_requested = false;
+		void set_activated(bool p_activated) {
+			if (p_activated && !activated) {
+				minimize_requested = false;
+			}
+			activated = p_activated;
+		}
 		bool tiled_left = false;
 		bool tiled_right = false;
 		bool tiled_top = false;
@@ -318,6 +368,7 @@ public:
 
 		xdg_toplevel_icon_v1 *xdg_icon = nullptr;
 		wl_buffer *icon_buffer = nullptr;
+		Dictionary icon_buffer_info;
 		bool icon_set = false;
 
 		HashSet<struct wl_output *> wl_outputs;
@@ -346,6 +397,9 @@ public:
 
 		String exported_handle;
 
+		// Glass supplies backing pixels even before the first wl_surface.enter.
+		bool size_in_pixels = false;
+
 		// Currently applied buffer scale.
 		int buffer_scale = 1;
 
@@ -367,6 +421,8 @@ public:
 
 		struct zxdg_toplevel_decoration_v1 *xdg_toplevel_decoration = nullptr;
 
+		bool modal_requested = false;
+		struct xdg_dialog_v1 *modal_dialog = nullptr;
 		struct xdg_activation_token_v1 *pending_xdg_activation_token = nullptr;
 
 		struct zwp_idle_inhibitor_v1 *wp_idle_inhibitor = nullptr;
@@ -439,6 +495,8 @@ public:
 
 		uint32_t button_time = 0;
 		uint32_t button_serial = 0;
+		uint32_t grab_serial = 0;
+		DisplayServerEnums::WindowID grab_origin = DisplayServerEnums::INVALID_WINDOW_ID;
 
 		uint32_t scroll_type = WL_POINTER_AXIS_SOURCE_WHEEL;
 
@@ -481,6 +539,8 @@ public:
 	};
 
 	struct OfferState {
+		uint32_t source_actions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+		uint32_t action = 0;
 		HashSet<String> mime_types;
 	};
 
@@ -527,6 +587,7 @@ public:
 		wl_fixed_t old_pinch_scale = 0;
 
 		struct wl_surface *cursor_surface = nullptr;
+		uint32_t submitted_cursor_buffer_id = 0;
 		struct wl_callback *cursor_frame_callback = nullptr;
 		uint32_t cursor_time_ms = 0;
 
@@ -577,6 +638,10 @@ public:
 		bool meta_pressed = false;
 
 		uint32_t last_key_pressed_serial = 0;
+		uint32_t selection_serial = 0;
+		// The requesting surface and serial must come from the same seat event.
+		uint32_t activation_serial = 0;
+		DisplayServerEnums::WindowID activation_source = DisplayServerEnums::INVALID_WINDOW_ID;
 
 		struct wl_data_device *wl_data_device = nullptr;
 
@@ -587,13 +652,25 @@ public:
 		int32_t last_touch_id = -1;
 
 		// Drag and drop.
+		Ref<DragOffer> native_drag;
+		Point2i drag_point;
 		DisplayServerEnums::WindowID dnd_id = DisplayServerEnums::INVALID_WINDOW_ID;
 		struct wl_data_offer *wl_data_offer_dnd = nullptr;
 		uint32_t dnd_enter_serial = 0;
 
+		struct wl_data_source *drag_source = nullptr;
+		struct wl_surface *drag_icon = nullptr;
+		struct wl_buffer *drag_buffer = nullptr;
+		DisplayServerEnums::WindowID drag_origin = DisplayServerEnums::INVALID_WINDOW_ID;
+		HashMap<String, Vector<uint8_t>> drag_data;
+		uint32_t drag_action = 0;
+
 		// Clipboard.
 		struct wl_data_source *wl_data_source_selection = nullptr;
-		Vector<uint8_t> selection_data;
+		HashMap<String, Vector<uint8_t>> selection_data;
+		struct wl_data_source *pending_selection = nullptr;
+		HashMap<String, Vector<uint8_t>> pending_selection_data;
+		uint64_t selection_generation = 0;
 
 		struct wl_data_offer *wl_data_offer_selection = nullptr;
 
@@ -611,6 +688,11 @@ public:
 		List<struct zwp_tablet_tool_v2 *> tablet_tools;
 
 		// IME.
+		struct zwp_text_input_v1 *text_input_v1 = nullptr;
+		uint32_t ime_serial = 0;
+		int preedit_byte_cursor = 0;
+		String reset_commit;
+		PackedStringArray ime_modifiers;
 		struct zwp_text_input_v3 *wp_text_input = nullptr;
 		DisplayServerEnums::WindowID ime_window_id = DisplayServerEnums::INVALID_WINDOW_ID;
 		bool ime_enabled = false;
@@ -626,6 +708,7 @@ public:
 		uint32_t *buffer_data = nullptr;
 		uint32_t buffer_data_size = 0;
 
+		Size2i size;
 		Point2i hotspot;
 	};
 
@@ -656,7 +739,7 @@ public:
 
 private:
 	struct ThreadData {
-		SafeFlag thread_done;
+		int shutdown_pipe[2] = { -1, -1 };
 		Mutex mutex;
 
 		struct wl_display *wl_display = nullptr;
@@ -667,6 +750,9 @@ private:
 
 	Thread events_thread;
 	ThreadData thread_data;
+	LocalVector<int64_t> selection_writes;
+	void reap_selection_writes(bool p_wait);
+	static void _finish_drag_source(SeatState *p_seat, uint32_t p_action);
 
 	HashMap<DisplayServerEnums::WindowID, WindowState> windows;
 
@@ -752,6 +838,7 @@ private:
 	static void _wl_registry_on_global(void *data, struct wl_registry *wl_registry, uint32_t name, const char *interface, uint32_t version);
 	static void _wl_registry_on_global_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
 
+	void _set_mapped_transient_children(WindowState &p_owner);
 	static void _wl_surface_on_enter(void *data, struct wl_surface *wl_surface, struct wl_output *wl_output);
 	static void _wl_surface_on_leave(void *data, struct wl_surface *wl_surface, struct wl_output *wl_output);
 	static void _wl_surface_on_preferred_buffer_scale(void *data, struct wl_surface *wl_surface, int32_t factor);
@@ -798,6 +885,7 @@ private:
 	static void _wl_touch_on_shape(void *data, struct wl_touch *wl_touch, int32_t id, wl_fixed_t major, wl_fixed_t minor);
 	static void _wl_touch_on_orientation(void *data, struct wl_touch *wl_touch, int32_t id, wl_fixed_t orientation);
 
+	static void _queue_drag(SeatState *p_seat, DragEventMessage::Phase p_phase);
 	static void _wl_data_device_on_data_offer(void *data, struct wl_data_device *wl_data_device, struct wl_data_offer *id);
 	static void _wl_data_device_on_enter(void *data, struct wl_data_device *wl_data_device, uint32_t serial, struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y, struct wl_data_offer *id);
 	static void _wl_data_device_on_leave(void *data, struct wl_data_device *wl_data_device);
@@ -1131,6 +1219,10 @@ private:
 		.frame = _wp_tablet_tool_on_frame,
 	};
 
+	static const struct zwp_text_input_v1_listener text_input_v1_listener;
+	static void _create_text_input_v1(SeatState *p_seat);
+	static void _set_preedit(SeatState *ss, const char *text, int32_t cursor_begin, int32_t cursor_end);
+	static void _emit_ime(SeatState *ss);
 	static constexpr struct zwp_text_input_v3_listener wp_text_input_listener = {
 		.enter = _wp_text_input_on_enter,
 		.leave = _wp_text_input_on_leave,
@@ -1216,6 +1308,7 @@ private:
 
 	static Vector<uint8_t> _read_fd(int fd);
 	static int _allocate_shm_file(size_t size);
+	bool _replace_icon_buffer(const Ref<Image> &p_image, xdg_toplevel_icon_v1 *&r_icon, wl_buffer *&r_buffer, Dictionary *r_info = nullptr);
 
 	static Vector<uint8_t> _wl_data_offer_read(struct wl_display *wl_display, const char *p_mime, struct wl_data_offer *wl_data_offer);
 	static Vector<uint8_t> _wp_primary_selection_offer_read(struct wl_display *wl_display, const char *p_mime, struct zwp_primary_selection_offer_v1 *wp_primary_selection_offer);
@@ -1286,7 +1379,7 @@ public:
 	void set_icon(const Ref<Image> &p_icon, DisplayServerEnums::WindowID p_window_id);
 	void set_default_icon(const Ref<Image> &p_icon);
 
-	void window_create(DisplayServerEnums::WindowID p_window_id, const Size2i &p_size, DisplayServerEnums::WindowID p_parent_id = DisplayServerEnums::INVALID_WINDOW_ID);
+	void window_create(DisplayServerEnums::WindowID p_window_id, const Size2i &p_size, DisplayServerEnums::WindowID p_parent_id, bool p_size_in_pixels);
 	void window_create_popup(DisplayServerEnums::WindowID p_window_id, DisplayServerEnums::WindowID p_parent_id, Rect2i p_rect);
 	void window_destroy(DisplayServerEnums::WindowID p_window_Id);
 
@@ -1294,6 +1387,7 @@ public:
 	// detect deleted windows.
 	bool window_exists(DisplayServerEnums::WindowID p_window_id) const;
 
+	void window_set_modal(DisplayServerEnums::WindowID p_window_id, bool p_modal);
 	void window_set_parent(DisplayServerEnums::WindowID p_window_id, DisplayServerEnums::WindowID p_parent_id);
 
 	struct wl_surface *window_get_wl_surface(DisplayServerEnums::WindowID p_window_id) const;
@@ -1315,7 +1409,9 @@ public:
 	void window_set_title(DisplayServerEnums::WindowID p_window_id, const String &p_title);
 	void window_set_app_id(DisplayServerEnums::WindowID p_window_id, const String &p_app_id);
 
-	bool window_is_focused(DisplayServerEnums::WindowID p_window_id);
+	bool window_is_focused(DisplayServerEnums::WindowID p_window_id) const;
+	DisplayServerEnums::WindowID get_focused_window() const;
+	void window_finish_ime(DisplayServerEnums::WindowID p_id, bool p_commit);
 
 	// Optional - requires xdg_activation_v1
 	void window_request_attention(DisplayServerEnums::WindowID p_window_id, bool p_hint_strong_focus = false);
@@ -1346,7 +1442,8 @@ public:
 	void cursor_set_shape(DisplayServerEnums::CursorShape p_cursor_shape);
 
 	void cursor_set_custom_shape(DisplayServerEnums::CursorShape p_cursor_shape);
-	void cursor_shape_set_custom_image(DisplayServerEnums::CursorShape p_cursor_shape, Ref<Image> p_image, const Point2i &p_hotspot);
+	Dictionary cursor_get_custom_buffer_info() const;
+	Error cursor_shape_set_custom_image(DisplayServerEnums::CursorShape p_cursor_shape, Ref<Image> p_image, const Point2i &p_hotspot);
 	void cursor_shape_clear_custom_image(DisplayServerEnums::CursorShape p_cursor_shape);
 
 	void window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window_id);
@@ -1366,6 +1463,18 @@ public:
 	Vector<uint8_t> selection_get_mime(const String &p_mime) const;
 
 	void selection_set_text(const String &p_text);
+	struct DragSourceData {
+		HashMap<String, Vector<uint8_t>> formats;
+		uint32_t actions = 0;
+		const uint8_t *bgra = nullptr;
+		Size2i size;
+		Point2i hotspot;
+	};
+	Error drag_source_start(DisplayServerEnums::WindowID p_id, const DragSourceData &p_data);
+	int drag_source_result(DisplayServerEnums::WindowID p_id, bool p_cancel);
+	Error selection_set_data(const HashMap<String, Vector<uint8_t>> &p_data);
+	Vector<String> selection_types() const;
+	Error selection_open(const String &p_mime, Vector<uint8_t> &r_owned, int &r_fd) const;
 
 	// Optional primary support - requires wp_primary_selection_unstable_v1
 	bool primary_has_mime(const String &p_mime) const;

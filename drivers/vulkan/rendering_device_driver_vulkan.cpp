@@ -4056,6 +4056,10 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 
 	CommandQueue *command_queue = (CommandQueue *)(p_cmd_queue.id);
 	SwapChain *swap_chain = (SwapChain *)(p_swap_chain.id);
+	if (reinterpret_cast<RenderingContextDriverVulkan::Surface *>(swap_chain->surface)->presentation_paused.is_set()) {
+		r_resize_required = false;
+		return FramebufferID();
+	}
 	if ((swap_chain->vk_swapchain == VK_NULL_HANDLE) || context_driver->surface_get_needs_resize(swap_chain->surface)) {
 		// The surface does not have a valid swap chain or it indicates it requires a resize.
 		r_resize_required = true;
@@ -7451,6 +7455,8 @@ uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 
 uint64_t RenderingDeviceDriverVulkan::api_trait_get(ApiTrait p_trait) {
 	switch (p_trait) {
+		case API_TRAIT_FRAMEBUFFER_SAMPLE_COUNTS:
+			return physical_device_properties.limits.framebufferColorSampleCounts & physical_device_properties.limits.framebufferDepthSampleCounts;
 		case API_TRAIT_TEXTURE_TRANSFER_ALIGNMENT:
 			return (uint64_t)MAX((uint64_t)16, physical_device_properties.limits.optimalBufferCopyOffsetAlignment);
 		case API_TRAIT_SHADER_CHANGE_INVALIDATION:

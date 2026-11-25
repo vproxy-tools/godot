@@ -1261,6 +1261,7 @@ Files extracted from upstream source:
 - `staging/fractional-scale/fractional-scale-v1.xml`
 - `staging/xdg-activation/README`
 - `staging/xdg-activation/xdg-activation-v1.xml`
+- `staging/xdg-dialog/xdg-dialog-v1.xml`
 - `staging/xdg-system-bell/xdg-system-bell-v1.xml`
 - `staging/pointer-warp/pointer-warp-v1.xml`
 - `staging/pointer-warp/README`
